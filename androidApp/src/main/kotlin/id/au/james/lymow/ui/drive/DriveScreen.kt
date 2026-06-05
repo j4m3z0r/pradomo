@@ -35,6 +35,8 @@ fun DriveScreen(
     }
 
     val connected = state.connection == ConnectionState.Connected
+    val linkLost = state.connection == ConnectionState.Disconnected ||
+        state.connection == ConnectionState.Error
     val statusColor = when (state.connection) {
         ConnectionState.Connected -> LymowColors.connected
         ConnectionState.Connecting -> LymowColors.connecting
@@ -88,7 +90,7 @@ fun DriveScreen(
             )
             Spacer(Modifier.weight(1f))
 
-            if (state.connection == ConnectionState.Disconnected) {
+            if (linkLost) {
                 Surface(color = LymowColors.danger, modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(12.dp)) {
                         Text("⚠ LINK LOST — mower may still be moving", color = Color.White)

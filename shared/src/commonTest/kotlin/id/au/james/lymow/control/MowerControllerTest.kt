@@ -20,7 +20,8 @@ private class FakeTransport : MowerTransport {
     private var cb: ((ByteArray) -> Unit)? = null
     private var disconnectCb: (() -> Unit)? = null
     override suspend fun connect() { connected = true }
-    override suspend fun disconnect() { connected = false }
+    var closed = false
+    override fun close() { connected = false; closed = true }
     override suspend fun startNotify(onValue: (ByteArray) -> Unit) { notifying = true; cb = onValue }
     override suspend fun stopNotify() { notifying = false }
     override suspend fun write(value: ByteArray) { writes.add(value) }
@@ -88,6 +89,15 @@ class MowerControllerTest {
         c.connect()
         t.loseConnection()
         assertEquals(ConnectionState.Disconnected, c.state.value.connection)
+    }
+
+    @Test fun lost_connection_closes_transport() = runTest {
+        val t = FakeTransport()
+        val c = MowerController(t, clientId = "abc", scope = backgroundScope)
+        c.connect()
+        t.loseConnection()
+        assertEquals(ConnectionState.Disconnected, c.state.value.connection)
+        assertTrue(t.closed)
     }
 
     @Test fun notification_updates_state() = runTest {

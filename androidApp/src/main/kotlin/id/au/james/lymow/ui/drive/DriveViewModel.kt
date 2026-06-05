@@ -58,4 +58,9 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
     fun onAppBackgrounded() {
         viewModelScope.launch { runCatching { controller?.disconnect() } }
     }
+
+    override fun onCleared() {
+        controller?.close()
+        controller = null
+    }
 }

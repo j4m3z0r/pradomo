@@ -72,7 +72,15 @@ class MowerController(
         keepaliveJob = null
         runCatching { stop() }
         runCatching { transport.stopNotify() }
-        transport.disconnect()
+        transport.close()
+        _state.update { it.copy(connection = ConnectionState.Disconnected) }
+    }
+
+    /** Synchronous teardown for ViewModel.onCleared and other non-suspending callers. */
+    fun close() {
+        keepaliveJob?.cancel()
+        keepaliveJob = null
+        transport.close()
         _state.update { it.copy(connection = ConnectionState.Disconnected) }
     }
 
@@ -89,6 +97,7 @@ class MowerController(
     private fun onConnectionLost() {
         keepaliveJob?.cancel()
         keepaliveJob = null
+        transport.close()
         _state.update { it.copy(connection = ConnectionState.Disconnected) }
     }
 

@@ -17,7 +17,8 @@ interface MowerScanner {
  */
 interface MowerTransport {
     suspend fun connect()
-    suspend fun disconnect()
+    /** Synchronously tear down the link and release native resources. Safe to call from any thread. */
+    fun close()
     suspend fun startNotify(onValue: (ByteArray) -> Unit)
     suspend fun stopNotify()
     /** Write [value] to the control characteristic (Write-Without-Response). */

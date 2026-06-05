@@ -142,7 +142,7 @@ class AndroidMowerTransport(
         }
     }
 
-    override suspend fun disconnect() {
+    override fun close() {
         closing = true
         runCatching { gatt?.disconnect() }
         runCatching { gatt?.close() }
