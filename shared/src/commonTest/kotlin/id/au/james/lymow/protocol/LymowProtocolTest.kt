@@ -26,4 +26,40 @@ class LymowProtocolTest {
 
     @Test fun joystick_clamps_turn() =
         assertEquals(LymowProtocol.encodeJoystick(0f, -0.6f).hex(), LymowProtocol.encodeJoystick(0f, -9f).hex())
+
+    @Test fun init_frames_match_capture() {
+        assertEquals(
+            listOf(
+                "10314a025801",
+                "3802da0100",
+                "10312835",
+                "10314a021001",
+                "1031281438024a022801",
+            ),
+            LymowProtocol.INIT_FRAMES.map { it.hex() },
+        )
+    }
+
+    @Test fun keepalive_golden() {
+        val frame = LymowProtocol.keepaliveFrame("ASUS_AI2302_Android_2b3f7b75a62d548a")
+        assertEquals(
+            "3802da0124415355535f4149323330325f416e64726f69645f32623366376237356136326435343861",
+            frame.hex(),
+        )
+    }
+
+    @Test fun keepalive_length_prefix() {
+        val frame = LymowProtocol.keepaliveFrame("abc")
+        assertEquals("3802da01", frame.copyOfRange(0, 4).hex())
+        assertEquals(3, frame[4].toInt())
+        assertEquals("abc", frame.copyOfRange(5, frame.size).decodeToString())
+    }
+
+    @Test fun make_client_id_format() {
+        val cid = LymowProtocol.makeClientId(model = "Android", host = "pixel")
+        val rand = cid.substringAfterLast("_")
+        assertEquals("Android_pixel", cid.removeSuffix("_$rand"))
+        assertEquals(16, rand.length)
+        rand.toLong(16) // parses as hex, else throws
+    }
 }
