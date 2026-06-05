@@ -1,5 +1,7 @@
 package id.au.james.lymow.protocol
 
+import kotlin.io.encoding.Base64
+
 object LymowProtocol {
     const val SERVICE_UUID = "12345678-1234-5678-1234-56789abcdef0"
     const val CONTROL_CHAR_UUID = "12345678-1234-5678-1234-56789abcdef1"
@@ -42,6 +44,11 @@ object LymowProtocol {
         require(cid.size <= 255) { "client_id too long" }
         return KEEPALIVE_PREFIX + byteArrayOf(cid.size.toByte()) + cid
     }
+
+    @OptIn(kotlin.io.encoding.ExperimentalEncodingApi::class)
+    fun toBle(payload: ByteArray): ByteArray = Base64.encode(payload).encodeToByteArray()
+    @OptIn(kotlin.io.encoding.ExperimentalEncodingApi::class)
+    fun fromBle(data: ByteArray): ByteArray = Base64.decode(data.decodeToString())
 
     fun makeClientId(model: String = "Android", host: String = "phone"): String {
         val rand = (kotlin.random.Random.nextLong() and Long.MAX_VALUE)

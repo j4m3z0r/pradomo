@@ -62,4 +62,11 @@ class LymowProtocolTest {
         assertEquals(16, rand.length)
         rand.toLong(16) // parses as hex, else throws
     }
+
+    @Test fun to_ble_from_ble_roundtrip() {
+        val payload = LymowProtocol.encodeJoystick(-0.5f, 0f)
+        val wire = LymowProtocol.toBle(payload)
+        assertEquals("EDE4AlIKDQAAAL8VAAAAAA==", wire.decodeToString())
+        assertEquals(payload.hex(), LymowProtocol.fromBle(wire).hex())
+    }
 }
