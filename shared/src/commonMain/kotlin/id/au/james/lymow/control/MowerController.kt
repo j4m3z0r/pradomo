@@ -48,6 +48,7 @@ class MowerController(
         try {
             transport.connect()
             transport.startNotify(::onNotify)
+            transport.onDisconnect { onConnectionLost() }
             for (frame in LymowProtocol.INIT_FRAMES) transport.write(LymowProtocol.toBle(frame))
             startKeepalive()
             _state.update { it.copy(connection = ConnectionState.Connected) }
@@ -83,6 +84,12 @@ class MowerController(
                 runCatching { transport.write(frame) }
             }
         }
+    }
+
+    private fun onConnectionLost() {
+        keepaliveJob?.cancel()
+        keepaliveJob = null
+        _state.update { it.copy(connection = ConnectionState.Disconnected) }
     }
 
     private fun onNotify(value: ByteArray) {

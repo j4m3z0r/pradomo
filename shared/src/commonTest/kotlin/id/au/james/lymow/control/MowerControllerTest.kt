@@ -18,12 +18,15 @@ private class FakeTransport : MowerTransport {
     var connected = false
     var notifying = false
     private var cb: ((ByteArray) -> Unit)? = null
+    private var disconnectCb: (() -> Unit)? = null
     override suspend fun connect() { connected = true }
     override suspend fun disconnect() { connected = false }
     override suspend fun startNotify(onValue: (ByteArray) -> Unit) { notifying = true; cb = onValue }
     override suspend fun stopNotify() { notifying = false }
     override suspend fun write(value: ByteArray) { writes.add(value) }
+    override fun onDisconnect(callback: () -> Unit) { disconnectCb = callback }
     fun feed(value: ByteArray) = cb?.invoke(value)
+    fun loseConnection() { connected = false; disconnectCb?.invoke() }
     fun framesHex() = writes.map { LymowProtocol.fromBle(it).hex() }
 }
 
@@ -76,6 +79,14 @@ class MowerControllerTest {
         c.disconnect()
         assertTrue("10313802520a0d000000001500000000" in t.framesHex())
         assertFalse(t.connected)
+        assertEquals(ConnectionState.Disconnected, c.state.value.connection)
+    }
+
+    @Test fun lost_connection_updates_state_to_disconnected() = runTest {
+        val t = FakeTransport()
+        val c = MowerController(t, clientId = "abc", scope = backgroundScope)
+        c.connect()
+        t.loseConnection()
         assertEquals(ConnectionState.Disconnected, c.state.value.connection)
     }
 

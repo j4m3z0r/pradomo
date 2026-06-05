@@ -22,4 +22,6 @@ interface MowerTransport {
     suspend fun stopNotify()
     /** Write [value] to the control characteristic (Write-Without-Response). */
     suspend fun write(value: ByteArray)
+    /** Register a callback fired if the link drops unexpectedly AFTER a successful connect. */
+    fun onDisconnect(callback: () -> Unit)
 }
