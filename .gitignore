@@ -1,0 +1,11 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+
+# Local-only design notes (not part of the release)
+docs/PROJECT-NOTES.md
+docs/MAPPING-SPEC.md
+docs/superpowers/
