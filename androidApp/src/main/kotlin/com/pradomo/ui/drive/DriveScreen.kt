@@ -46,6 +46,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.pradomo.control.ButtonAction
 import com.pradomo.control.ConnectionState
+import com.pradomo.control.ControllerModeGroup
 import com.pradomo.control.SmoothLevel
 import com.pradomo.control.SpeedMode
 import com.pradomo.input.UsbGamepadSource
@@ -82,6 +83,11 @@ fun DriveScreen(
     val smoothEnabled by vm.smoothEnabled.collectAsStateWithLifecycle()
     val smoothLevel by vm.smoothLevel.collectAsStateWithLifecycle()
     val trail by vm.trail.collectAsStateWithLifecycle()
+    val modeGroup by vm.modeGroup.collectAsStateWithLifecycle()
+    val modeSelecting by vm.modeSelecting.collectAsStateWithLifecycle()
+    val maneuverLabel by vm.maneuverLabel.collectAsStateWithLifecycle()
+    val cuttingWidthMm by vm.cuttingWidthMm.collectAsStateWithLifecycle()
+    val rowOverlapMm by vm.rowOverlapMm.collectAsStateWithLifecycle()
 
     var pocketMode by remember { mutableStateOf(false) }
     var tab by remember { mutableStateOf(Tab.DRIVE) }
@@ -150,6 +156,7 @@ fun DriveScreen(
                 Tab.DRIVE -> DriveTab(
                     pad, state.connection, state.telemetry, control, deck, speedMode,
                     connected, linkLost, gamepad != null,
+                    modeGroup, modeSelecting, maneuverLabel,
                     onJoystick = vm::onJoystick,
                     onEmergencyStop = vm::emergencyStop,
                     onMode = vm::setSpeedMode,
@@ -161,9 +168,12 @@ fun DriveScreen(
                 Tab.MAP -> MapView(pad, trail, state.telemetry, onClear = vm::clearMap)
                 Tab.SETTINGS -> SettingsTab(
                     pad, gamepad, topButton, bottomButton, smoothEnabled, smoothLevel,
+                    cuttingWidthMm, rowOverlapMm,
                     onTop = vm::setTopButton, onBottom = vm::setBottomButton,
                     onSmooth = vm::setSmoothEnabled,
                     onSmoothLevel = vm::setSmoothLevel,
+                    onCuttingWidth = vm::setCuttingWidthMm,
+                    onRowOverlap = vm::setRowOverlapMm,
                 )
             }
         }
@@ -182,6 +192,9 @@ private fun DriveTab(
     connected: Boolean,
     linkLost: Boolean,
     hasGamepad: Boolean,
+    modeGroup: ControllerModeGroup,
+    modeSelecting: Boolean,
+    maneuverLabel: String?,
     onJoystick: (Float, Float) -> Unit,
     onEmergencyStop: () -> Unit,
     onMode: (SpeedMode) -> Unit,
@@ -210,6 +223,8 @@ private fun DriveTab(
                 }
             }
         }
+
+        ModeBadge(modeGroup, modeSelecting, maneuverLabel)
 
         DriveCard(connected, control, speedMode, joySize, onJoystick, onEmergencyStop, onMode)
 
@@ -243,6 +258,59 @@ private fun DriveTab(
                 maxLines = 1)
         }
         Spacer(Modifier.height(8.dp))
+    }
+}
+
+@Composable
+private fun ModeBadge(group: ControllerModeGroup, selecting: Boolean, maneuverLabel: String?) {
+    // A maneuver is running: prominent, with how to bail out.
+    if (maneuverLabel != null) {
+        Surface(color = PradomoColors.mossDeep, shape = RoundedCornerShape(14.dp),
+            modifier = Modifier.fillMaxWidth()) {
+            Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Text("▶ $maneuverLabel", color = PradomoColors.textPrimary,
+                    fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.weight(1f))
+                Text("nudge stick to cancel", color = PradomoColors.textSecondary,
+                    style = MaterialTheme.typography.labelSmall)
+            }
+        }
+        return
+    }
+
+    val border = if (selecting) PradomoColors.connected else PradomoColors.surface2
+    Card(
+        colors = CardDefaults.cardColors(containerColor = PradomoColors.surface1),
+        border = androidx.compose.foundation.BorderStroke(if (selecting) 2.dp else 1.dp, border),
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("MODE", color = PradomoColors.textSecondary,
+                    style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.width(12.dp))
+                ControllerModeGroup.entries.forEach { g ->
+                    val on = g == group
+                    Surface(
+                        color = if (on) PradomoColors.mossDeep else Color.Transparent,
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier.padding(end = 6.dp),
+                    ) {
+                        Text(g.label, color = if (on) PradomoColors.textPrimary else PradomoColors.textSecondary,
+                            fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+                            style = MaterialTheme.typography.labelLarge,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
+                    }
+                }
+            }
+            val hint = when {
+                selecting -> "◀ ▶ to switch · release a button to confirm"
+                group == ControllerModeGroup.AUTO -> "Hold ● then ◀▶ K-turn · ▲▼ cruise · hold both + ◀▶ to switch"
+                else -> "Hold both buttons + ◀▶ to switch mode"
+            }
+            Text(hint, color = PradomoColors.textSecondary, style = MaterialTheme.typography.labelSmall)
+        }
     }
 }
 
@@ -385,10 +453,14 @@ private fun SettingsTab(
     bottomButton: ButtonAction,
     smoothEnabled: Boolean,
     smoothLevel: SmoothLevel,
+    cuttingWidthMm: Int,
+    rowOverlapMm: Int,
     onTop: (ButtonAction) -> Unit,
     onBottom: (ButtonAction) -> Unit,
     onSmooth: (Boolean) -> Unit,
     onSmoothLevel: (SmoothLevel) -> Unit,
+    onCuttingWidth: (Int) -> Unit,
+    onRowOverlap: (Int) -> Unit,
 ) {
     Column(
         Modifier.fillMaxSize().padding(pad).padding(horizontal = 16.dp)
@@ -409,8 +481,28 @@ private fun SettingsTab(
                 Text("Bottom button (large)", color = PradomoColors.textPrimary,
                     style = MaterialTheme.typography.labelLarge)
                 ButtonActionSelector(bottomButton, onBottom)
-                Text("Hold a button to momentarily change speed while driving.",
+                Text("In Speed mode, hold a button to momentarily change speed. Hold both buttons and push the stick ◀▶ to switch to Auto mode.",
                     color = PradomoColors.textSecondary, style = MaterialTheme.typography.labelSmall)
+            }
+        }
+
+        SectionHeader("AUTO MANEUVERS")
+        Card(colors = CardDefaults.cardColors(containerColor = PradomoColors.surface1)) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                val pitch = (cuttingWidthMm - rowOverlapMm).coerceAtLeast(20)
+                Text("In Auto mode: hold the big button and push the stick ◀▶ for a K-turn into the next row, or ▲▼ for cruise control.",
+                    color = PradomoColors.textSecondary, style = MaterialTheme.typography.labelSmall)
+                StepperRow("Cutting width", "$cuttingWidthMm mm",
+                    onMinus = { onCuttingWidth((cuttingWidthMm - 10).coerceIn(100, 600)) },
+                    onPlus = { onCuttingWidth((cuttingWidthMm + 10).coerceIn(100, 600)) })
+                StepperRow("Row overlap", "$rowOverlapMm mm",
+                    onMinus = { onRowOverlap((rowOverlapMm - 5).coerceIn(0, 150)) },
+                    onPlus = { onRowOverlap((rowOverlapMm + 5).coerceIn(0, 150)) })
+                Text("Row spacing (pitch): $pitch mm",
+                    color = PradomoColors.textPrimary, style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold)
+                Text("⚠ Set cutting width to your mower's real value — it drives how far each K-turn shifts over. Validate on the mower before relying on it; the link has no watchdog, so a maneuver only stops on stick touch, E-STOP, or going out of range.",
+                    color = PradomoColors.warning, style = MaterialTheme.typography.labelSmall)
             }
         }
 
@@ -451,6 +543,21 @@ private fun SettingsTab(
             }
         }
         Spacer(Modifier.height(8.dp))
+    }
+}
+
+@Composable
+private fun StepperRow(label: String, value: String, onMinus: () -> Unit, onPlus: () -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = PradomoColors.textPrimary, style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.weight(1f))
+        FilledTonalButton(onClick = onMinus, modifier = Modifier.size(42.dp),
+            contentPadding = PaddingValues(0.dp)) { Text("−", fontSize = 20.sp) }
+        Text(value, color = PradomoColors.textPrimary, fontWeight = FontWeight.Bold,
+            style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center,
+            modifier = Modifier.width(84.dp))
+        FilledTonalButton(onClick = onPlus, modifier = Modifier.size(42.dp),
+            contentPadding = PaddingValues(0.dp)) { Text("+", fontSize = 20.sp) }
     }
 }
 
