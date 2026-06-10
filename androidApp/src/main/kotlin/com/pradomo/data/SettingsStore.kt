@@ -29,6 +29,7 @@ class SettingsStore(private val context: Context) {
     private val keyCuttingWidth = intPreferencesKey("cutting_width_mm")
     private val keyRowOverlap = intPreferencesKey("row_overlap_mm")
     private val keyModeGroup = stringPreferencesKey("controller_mode_group")
+    private val keyCruiseCorrection = booleanPreferencesKey("cruise_correction")
 
     val deckHeightMm: Flow<Int> = context.dataStore.data.map { it[keyDeck] ?: DEFAULT_DECK_MM }
     val topButton: Flow<ButtonAction> = context.dataStore.data.map { it.action(keyTop, ButtonAction.SLOW) }
@@ -46,6 +47,8 @@ class SettingsStore(private val context: Context) {
         prefs[keyModeGroup]?.let { runCatching { ControllerModeGroup.valueOf(it) }.getOrNull() }
             ?: ControllerModeGroup.SPEED
     }
+    /** Auto-correct cruise heading (hold a straight line on slopes). Off by default. */
+    val cruiseCorrection: Flow<Boolean> = context.dataStore.data.map { it[keyCruiseCorrection] ?: false }
 
     suspend fun setDeckHeightMm(mm: Int) = context.dataStore.edit { it[keyDeck] = mm }
     suspend fun setTopButton(a: ButtonAction) = context.dataStore.edit { it[keyTop] = a.name }
@@ -55,6 +58,7 @@ class SettingsStore(private val context: Context) {
     suspend fun setCuttingWidthMm(mm: Int) = context.dataStore.edit { it[keyCuttingWidth] = mm }
     suspend fun setRowOverlapMm(mm: Int) = context.dataStore.edit { it[keyRowOverlap] = mm }
     suspend fun setModeGroup(g: ControllerModeGroup) = context.dataStore.edit { it[keyModeGroup] = g.name }
+    suspend fun setCruiseCorrection(on: Boolean) = context.dataStore.edit { it[keyCruiseCorrection] = on }
 
     private fun androidx.datastore.preferences.core.Preferences.action(
         key: androidx.datastore.preferences.core.Preferences.Key<String>,

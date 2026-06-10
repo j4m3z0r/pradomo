@@ -92,6 +92,9 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
     val cuttingWidthMm: StateFlow<Int> = _cuttingWidthMm.asStateFlow()
     private val _rowOverlapMm = MutableStateFlow(SettingsStore.DEFAULT_ROW_OVERLAP_MM)
     val rowOverlapMm: StateFlow<Int> = _rowOverlapMm.asStateFlow()
+    /** Opt-in: auto-correct cruise heading to hold a straight line (e.g. on slopes). */
+    private val _cruiseCorrection = MutableStateFlow(false)
+    val cruiseCorrection: StateFlow<Boolean> = _cruiseCorrection.asStateFlow()
 
     private val settings = SettingsStore(app)
 
@@ -123,6 +126,7 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
             _cuttingWidthMm.value = settings.cuttingWidthMm.first()
             _rowOverlapMm.value = settings.rowOverlapMm.first()
             _modeGroup.value = settings.modeGroup.first()
+            _cruiseCorrection.value = settings.cruiseCorrection.first()
         }
     }
 
@@ -236,17 +240,26 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
 
-        // A maneuver is running: ignore the stick until it recenters, then let any fresh
-        // deflection cancel it (the user grabbing back control).
+        // A maneuver is running. Arm once the stick returns near center after the trigger,
+        // then respond by maneuver type:
+        //  - Cruise: left/right steers (blended in the loop); forward/back past a threshold
+        //    disengages. Small fwd/back nudges while steering are ignored.
+        //  - K-turn (autonomous): any fresh deflection cancels — the user grabbing control.
         if (activeManeuver != null) {
+            val cruise = activeManeuver is CruiseManeuver
             if (!maneuverArmed) {
-                if (mag < STICK_RECENTER) maneuverArmed = true
+                val centered = if (cruise) abs(v.drive) < STICK_RECENTER else mag < STICK_RECENTER
+                if (centered) maneuverArmed = true
                 return
             }
-            if (mag >= STICK_DEADZONE) {
-                cancelManeuver() // fall through and treat this push as a normal command
+            if (cruise) {
+                if (abs(v.drive) >= CRUISE_DISENGAGE_DRIVE) {
+                    cancelManeuver() // fall through and treat this push as a normal command
+                } else {
+                    return // stay engaged; the loop blends the live lateral as steering
+                }
             } else {
-                return
+                if (mag >= STICK_DEADZONE) cancelManeuver() else return
             }
         }
 
@@ -267,6 +280,15 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
         applyEffectiveSpeed()
     }
 
+    /** Swipe selector (touch parity with the gamepad both-buttons chord): set the group. */
+    fun setModeGroup(g: ControllerModeGroup) {
+        if (_modeGroup.value == g) return
+        cancelManeuver() // changing group drops any running maneuver
+        _modeGroup.value = g
+        applyEffectiveSpeed()
+        persist { settings.setModeGroup(g) }
+    }
+
     /**
      * Controller buttons. Holding *both* enters mode-select (stick cycles the group).
      * In the Speed group a single held button is a momentary speed override; in the Auto
@@ -274,6 +296,8 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun onButton(e: ButtonEvent) {
         if (e.pressed) heldButtons.add(e.buttonId) else heldButtons.remove(e.buttonId)
+        // Pressing any button disengages a running maneuver (e.g. cruise).
+        if (e.pressed) cancelManeuver()
         val top = SettingsStore.KEYCODE_TOP in heldButtons
         val bottom = SettingsStore.KEYCODE_BOTTOM in heldButtons
         val bothHeld = top && bottom
@@ -340,22 +364,44 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
         val v = _control.value
         if (hypot(v.drive, v.turn) < AUTO_TRIGGER_DEADZONE) return
 
-        val maneuver = if (abs(v.turn) >= abs(v.drive)) {
-            val dir = if (v.turn > 0f) TurnDirection.LEFT else TurnDirection.RIGHT
-            _maneuverLabel.value = "K-turn ${if (dir == TurnDirection.LEFT) "left" else "right"}"
+        if (abs(v.turn) >= abs(v.drive)) startUTurn(if (v.turn > 0f) TurnDirection.LEFT else TurnDirection.RIGHT)
+        else startCruise(forward = v.drive > 0f)
+    }
+
+    /** Touch parity: single-tap the joystick's left/right edge (Auto mode) → start a K-turn. */
+    fun touchUTurn(left: Boolean) {
+        if (startTouchAllowed()) startUTurn(if (left) TurnDirection.LEFT else TurnDirection.RIGHT)
+    }
+
+    /** Touch parity: single-tap the joystick's top/bottom edge (Auto mode) → start cruise. */
+    fun touchCruise(forward: Boolean) {
+        if (startTouchAllowed()) startCruise(forward)
+    }
+
+    /** Gate for touch-initiated maneuvers; a tap while one is running cancels it instead. */
+    private fun startTouchAllowed(): Boolean {
+        if (controller == null || _modeGroup.value != ControllerModeGroup.AUTO || _modeSelecting.value) return false
+        if (activeManeuver != null) { cancelManeuver(); return false }
+        return true
+    }
+
+    private fun startUTurn(dir: TurnDirection) {
+        _maneuverLabel.value = "K-turn ${if (dir == TurnDirection.LEFT) "left" else "right"}"
+        startManeuver(
             MultiPointTurn(
                 dir,
                 rowPitchMetres(),
                 MultiPointTurn.Params(
                     turnScale = TURN_LIMIT,
-                    linearScale = (controller?.maxLinear ?: SpeedMode.NORMAL.maxLinear),
+                    linearScale = controller?.maxLinear ?: SpeedMode.NORMAL.maxLinear,
                 ),
-            )
-        } else {
-            _maneuverLabel.value = if (v.drive > 0f) "Cruise forward" else "Cruise back"
-            CruiseManeuver(if (v.drive > 0f) CRUISE_DRIVE else -CRUISE_DRIVE)
-        }
-        startManeuver(maneuver)
+            ),
+        )
+    }
+
+    private fun startCruise(forward: Boolean) {
+        _maneuverLabel.value = if (forward) "Cruise forward" else "Cruise back"
+        startManeuver(CruiseManeuver(if (forward) CRUISE_DRIVE else -CRUISE_DRIVE, correct = _cruiseCorrection.value))
     }
 
     private fun startManeuver(m: Maneuver) {
@@ -392,11 +438,13 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
         if (pos == null) { cancelManeuver(); return } // no pose → can't close the loop safely
         val cmd = m.step(Pose(pos.first, pos.second, tel.heading ?: 0f), dt)
         if (cmd.done) { cancelManeuver(); return }
-        runCatching { controller?.drive(cmd.drive, cmd.turn) }
+        // Cruise lets the user steer live: blend the stick's left/right onto the command.
+        val turn = if (m is CruiseManeuver) (cmd.turn + _control.value.turn).coerceIn(-1f, 1f) else cmd.turn
+        runCatching { controller?.drive(cmd.drive, turn) }
         lastSentNonzero = true
-        smoother.reset(cmd.drive, cmd.turn) // keep the smoother synced for a clean handoff
+        smoother.reset(cmd.drive, turn) // keep the smoother synced for a clean handoff
         lastCmdLinear = cmd.drive * _speedMode.value.maxLinear
-        lastCmdAngular = cmd.turn * TURN_LIMIT
+        lastCmdAngular = turn * TURN_LIMIT
     }
 
     fun setTopButton(a: ButtonAction) {
@@ -433,6 +481,12 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
     fun setRowOverlapMm(mm: Int) {
         _rowOverlapMm.value = mm
         persist { settings.setRowOverlapMm(mm) }
+    }
+
+    /** Toggle cruise heading auto-correction (takes effect on the next cruise engage). */
+    fun setCruiseCorrection(on: Boolean) {
+        _cruiseCorrection.value = on
+        persist { settings.setCruiseCorrection(on) }
     }
 
     private fun persist(block: suspend () -> Unit) {
@@ -507,6 +561,7 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
         const val MODE_CYCLE_THRESHOLD = 0.6f // L/R push to step the mode group
         const val AUTO_TRIGGER_DEADZONE = 0.5f // deliberate push to start a maneuver
         const val CRUISE_DRIVE = 0.6f    // normalized cruise speed (~0.3 m/s in Normal)
+        const val CRUISE_DISENGAGE_DRIVE = 0.5f // fwd/back past this disengages cruise
     }
 }
 

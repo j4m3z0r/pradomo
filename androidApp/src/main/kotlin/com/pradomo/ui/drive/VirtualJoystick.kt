@@ -6,6 +6,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.animation.core.animateTo
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -26,7 +27,11 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.pradomo.ui.theme.Dimens
 import com.pradomo.ui.theme.PradomoColors
+import kotlin.math.abs
 import kotlinx.coroutines.launch
+
+/** Which edge of the joystick's outer ring was tapped (Auto-mode maneuver triggers). */
+enum class EdgeZone { LEFT, RIGHT, UP, DOWN }
 
 @Composable
 fun VirtualJoystick(
@@ -36,6 +41,8 @@ fun VirtualJoystick(
     onVector: (drive: Float, turn: Float) -> Unit,
     modifier: Modifier = Modifier,
     gateSize: Dp = Dimens.joystickGate,
+    autoMode: Boolean = false,
+    onEdgeTap: (EdgeZone) -> Unit = {},
 ) {
     val density = LocalDensity.current
     val gatePx = with(density) { gateSize.toPx() }
@@ -68,6 +75,24 @@ fun VirtualJoystick(
     Canvas(
         modifier
             .size(gateSize)
+            // Auto mode: a tap on the outer ring fires a maneuver (no drive). Separate
+            // pointerInput from the drag below — one pointerInput can't host two gesture
+            // loops. A tap isn't a drag, so the two don't fight.
+            .pointerInput(enabled, autoMode) {
+                if (!enabled || !autoMode) return@pointerInput
+                detectTapGestures(onTap = { off ->
+                    val r = size.width / 2f
+                    val v = off - Offset(r, size.height / 2f)
+                    if (v.getDistance() < r * 0.5f) return@detectTapGestures // centre: ignore
+                    val zone = if (abs(v.x) >= abs(v.y)) {
+                        if (v.x >= 0f) EdgeZone.RIGHT else EdgeZone.LEFT
+                    } else {
+                        if (v.y < 0f) EdgeZone.UP else EdgeZone.DOWN
+                    }
+                    onEdgeTap(zone)
+                })
+            }
+            // Drag drives the mower (both Speed and Auto modes).
             .pointerInput(enabled) {
                 if (!enabled) return@pointerInput
                 detectDragGestures(
@@ -94,12 +119,19 @@ fun VirtualJoystick(
             ),
             radius = r, center = c,
         )
-        drawCircle(color = PradomoColors.hairline, radius = r, center = c, style = Stroke(1.5.dp.toPx()))
-        // Four direction ticks.
-        val tickColor = if (enabled) PradomoColors.textSecondary else PradomoColors.textDisabled
-        val tw = 4.dp.toPx()
-        val tOut = r * 0.93f
-        val tIn = r * 0.80f
+        // In Auto mode brighten the rim to signal the edges are tappable.
+        val rimColor = if (autoMode && enabled) PradomoColors.connected else PradomoColors.hairline
+        drawCircle(color = rimColor, radius = r, center = c, style = Stroke((if (autoMode) 2.5 else 1.5).dp.toPx()))
+        // Four direction ticks (accent + longer in Auto mode: these are the tap targets).
+        val auto = autoMode && enabled
+        val tickColor = when {
+            auto -> PradomoColors.connected
+            enabled -> PradomoColors.textSecondary
+            else -> PradomoColors.textDisabled
+        }
+        val tw = (if (auto) 6 else 4).dp.toPx()
+        val tOut = r * 0.95f
+        val tIn = r * (if (auto) 0.70f else 0.80f)
         drawLine(tickColor, Offset(c.x, c.y - tOut), Offset(c.x, c.y - tIn), tw, StrokeCap.Round)
         drawLine(tickColor, Offset(c.x, c.y + tIn), Offset(c.x, c.y + tOut), tw, StrokeCap.Round)
         drawLine(tickColor, Offset(c.x - tOut, c.y), Offset(c.x - tIn, c.y), tw, StrokeCap.Round)

@@ -9,6 +9,9 @@ import android.os.Build
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -30,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -58,6 +62,7 @@ import com.pradomo.ui.theme.PradomoColors
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 private enum class Tab(val label: String, val icon: ImageVector) {
@@ -88,6 +93,7 @@ fun DriveScreen(
     val maneuverLabel by vm.maneuverLabel.collectAsStateWithLifecycle()
     val cuttingWidthMm by vm.cuttingWidthMm.collectAsStateWithLifecycle()
     val rowOverlapMm by vm.rowOverlapMm.collectAsStateWithLifecycle()
+    val cruiseCorrection by vm.cruiseCorrection.collectAsStateWithLifecycle()
 
     var pocketMode by remember { mutableStateOf(false) }
     var tab by remember { mutableStateOf(Tab.DRIVE) }
@@ -160,6 +166,15 @@ fun DriveScreen(
                     onJoystick = vm::onJoystick,
                     onEmergencyStop = vm::emergencyStop,
                     onMode = vm::setSpeedMode,
+                    onModeGroup = vm::setModeGroup,
+                    onEdgeTap = { zone ->
+                        when (zone) {
+                            EdgeZone.LEFT -> vm.touchUTurn(left = true)
+                            EdgeZone.RIGHT -> vm.touchUTurn(left = false)
+                            EdgeZone.UP -> vm.touchCruise(forward = true)
+                            EdgeZone.DOWN -> vm.touchCruise(forward = false)
+                        }
+                    },
                     onBlade = vm::setBlade,
                     onHeight = vm::setHeightMm,
                     onEnterPocket = { pocketMode = true },
@@ -168,12 +183,13 @@ fun DriveScreen(
                 Tab.MAP -> MapView(pad, trail, state.telemetry, onClear = vm::clearMap)
                 Tab.SETTINGS -> SettingsTab(
                     pad, gamepad, topButton, bottomButton, smoothEnabled, smoothLevel,
-                    cuttingWidthMm, rowOverlapMm,
+                    cuttingWidthMm, rowOverlapMm, cruiseCorrection,
                     onTop = vm::setTopButton, onBottom = vm::setBottomButton,
                     onSmooth = vm::setSmoothEnabled,
                     onSmoothLevel = vm::setSmoothLevel,
                     onCuttingWidth = vm::setCuttingWidthMm,
                     onRowOverlap = vm::setRowOverlapMm,
+                    onCruiseCorrection = vm::setCruiseCorrection,
                 )
             }
         }
@@ -198,6 +214,8 @@ private fun DriveTab(
     onJoystick: (Float, Float) -> Unit,
     onEmergencyStop: () -> Unit,
     onMode: (SpeedMode) -> Unit,
+    onModeGroup: (ControllerModeGroup) -> Unit,
+    onEdgeTap: (EdgeZone) -> Unit,
     onBlade: (BladeSpeed) -> Unit,
     onHeight: (Int) -> Unit,
     onEnterPocket: () -> Unit,
@@ -224,9 +242,12 @@ private fun DriveTab(
             }
         }
 
-        ModeBadge(modeGroup, modeSelecting, maneuverLabel)
+        if (maneuverLabel != null) RunningManeuverBanner(maneuverLabel)
 
-        DriveCard(connected, control, speedMode, joySize, onJoystick, onEmergencyStop, onMode)
+        DriveCard(
+            connected, control, speedMode, joySize, modeGroup, modeSelecting,
+            onJoystick, onEmergencyStop, onMode, onModeGroup, onEdgeTap,
+        )
 
         // Blade + deck slider cards
         val blades = BladeSpeed.entries
@@ -261,55 +282,105 @@ private fun DriveTab(
     }
 }
 
+/** Slim banner shown while a semi-autonomous maneuver is running, with how to bail out. */
 @Composable
-private fun ModeBadge(group: ControllerModeGroup, selecting: Boolean, maneuverLabel: String?) {
-    // A maneuver is running: prominent, with how to bail out.
-    if (maneuverLabel != null) {
-        Surface(color = PradomoColors.mossDeep, shape = RoundedCornerShape(14.dp),
-            modifier = Modifier.fillMaxWidth()) {
-            Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically) {
-                Text("▶ $maneuverLabel", color = PradomoColors.textPrimary,
-                    fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.weight(1f))
-                Text("nudge stick to cancel", color = PradomoColors.textSecondary,
-                    style = MaterialTheme.typography.labelSmall)
-            }
+private fun RunningManeuverBanner(label: String) {
+    Surface(color = PradomoColors.mossDeep, shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth()) {
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Text("▶ $label", color = PradomoColors.textPrimary,
+                fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.weight(1f))
+            Text("touch stick to cancel", color = PradomoColors.textSecondary,
+                style = MaterialTheme.typography.labelSmall)
         }
-        return
     }
+}
 
-    val border = if (selecting) PradomoColors.connected else PradomoColors.surface2
-    Card(
-        colors = CardDefaults.cardColors(containerColor = PradomoColors.surface1),
-        border = androidx.compose.foundation.BorderStroke(if (selecting) 2.dp else 1.dp, border),
-    ) {
-        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("MODE", color = PradomoColors.textSecondary,
-                    style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.width(12.dp))
-                ControllerModeGroup.entries.forEach { g ->
-                    val on = g == group
-                    Surface(
-                        color = if (on) PradomoColors.mossDeep else Color.Transparent,
-                        shape = RoundedCornerShape(50),
-                        modifier = Modifier.padding(end = 6.dp),
-                    ) {
-                        Text(g.label, color = if (on) PradomoColors.textPrimary else PradomoColors.textSecondary,
-                            fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
-                            style = MaterialTheme.typography.labelLarge,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
-                    }
+/**
+ * The mode selector: a 2-page swipe in place of the old speed row. Page 0 = Slow/Normal/
+ * Turbo chips; page 1 = the Auto legend. Swiping (or the gamepad both-buttons+◀▶ chord,
+ * which moves [group]) switches the active group. A "MODE ●○" dot row shows the page.
+ */
+@Composable
+private fun ModePager(
+    group: ControllerModeGroup,
+    selecting: Boolean,
+    speedMode: SpeedMode,
+    connected: Boolean,
+    onMode: (SpeedMode) -> Unit,
+    onModeGroup: (ControllerModeGroup) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("MODE", color = PradomoColors.textSecondary,
+                style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.width(4.dp))
+            // Tappable dots (swipe also works); tapping a dot jumps to that group.
+            ControllerModeGroup.entries.forEach { g ->
+                val on = g == group
+                Box(
+                    Modifier.size(22.dp).clickable { onModeGroup(g) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(
+                        Modifier.size(if (on) 9.dp else 6.dp).background(
+                            if (on) PradomoColors.connected else PradomoColors.textSecondary,
+                            RoundedCornerShape(50),
+                        ),
+                    )
                 }
             }
-            val hint = when {
-                selecting -> "◀ ▶ to switch · release a button to confirm"
-                group == ControllerModeGroup.AUTO -> "Hold ● then ◀▶ K-turn · ▲▼ cruise · hold both + ◀▶ to switch"
-                else -> "Hold both buttons + ◀▶ to switch mode"
+            Spacer(Modifier.weight(1f))
+            Text(if (selecting) "switching…" else "tap ●○ · swipe ◀▶", color = PradomoColors.textSecondary,
+                style = MaterialTheme.typography.labelSmall)
+        }
+        // Horizontal swipe across the strip switches group. A HorizontalPager (or
+        // detectHorizontalDragGestures) loses the drag here because the SegmentedButtons
+        // consume the down; intercept with requireUnconsumed=false and only claim the
+        // gesture once it's clearly a horizontal drag, so chip taps still register.
+        Box(
+            Modifier.fillMaxWidth().pointerInput(group) {
+                val slop = 10.dp.toPx()
+                val threshold = 36.dp.toPx()
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    var accum = 0f
+                    var claimed = false
+                    while (true) {
+                        val change = awaitPointerEvent().changes.firstOrNull() ?: break
+                        accum += change.positionChange().x
+                        if (!claimed && abs(accum) > slop) claimed = true
+                        if (claimed) change.consume()
+                        if (!change.pressed) break
+                    }
+                    if (accum <= -threshold) onModeGroup(group.next())
+                    else if (accum >= threshold) onModeGroup(group.prev())
+                }
+            },
+        ) {
+            when (group) {
+                ControllerModeGroup.SPEED -> SpeedSegmented(speedMode, connected, onMode)
+                ControllerModeGroup.AUTO -> AutoLegend()
             }
-            Text(hint, color = PradomoColors.textSecondary, style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+/** The Auto-mode page: explains the joystick-edge maneuver taps. */
+@Composable
+private fun AutoLegend() {
+    Surface(
+        color = PradomoColors.surface2, shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text("AUTO — tap the joystick edge", color = PradomoColors.connected,
+                fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge)
+            Text("◀ ▶  K-turn into the next row     ▲ ▼  cruise control",
+                color = PradomoColors.textPrimary, style = MaterialTheme.typography.bodyMedium)
         }
     }
 }
@@ -351,22 +422,33 @@ private fun DriveCard(
     control: com.pradomo.input.ControlVector,
     speedMode: SpeedMode,
     joySize: androidx.compose.ui.unit.Dp,
+    modeGroup: ControllerModeGroup,
+    modeSelecting: Boolean,
     onJoystick: (Float, Float) -> Unit,
     onEmergencyStop: () -> Unit,
     onMode: (SpeedMode) -> Unit,
+    onModeGroup: (ControllerModeGroup) -> Unit,
+    onEdgeTap: (EdgeZone) -> Unit,
 ) {
+    val auto = modeGroup == ControllerModeGroup.AUTO
     Card(colors = CardDefaults.cardColors(containerColor = PradomoColors.surface1)) {
         Column(Modifier.padding(16.dp)) {
-            SpeedSegmented(speedMode, connected, onMode)
+            ModePager(modeGroup, modeSelecting, speedMode, connected, onMode, onModeGroup)
             Spacer(Modifier.height(14.dp))
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                 VirtualJoystick(
                     enabled = connected, drive = control.drive, turn = control.turn,
                     onVector = onJoystick, gateSize = joySize,
+                    autoMode = auto, onEdgeTap = onEdgeTap,
                 )
             }
             Spacer(Modifier.height(6.dp))
-            Text(if (connected) "RELEASE TO STOP" else "NOT CONNECTED",
+            Text(
+                when {
+                    !connected -> "NOT CONNECTED"
+                    auto -> "TAP EDGE FOR MANEUVER · DRAG TO DRIVE"
+                    else -> "RELEASE TO STOP"
+                },
                 color = PradomoColors.textSecondary, modifier = Modifier.fillMaxWidth(),
                 textAlign = TextAlign.Center, style = MaterialTheme.typography.labelMedium)
             Spacer(Modifier.height(12.dp))
@@ -455,12 +537,14 @@ private fun SettingsTab(
     smoothLevel: SmoothLevel,
     cuttingWidthMm: Int,
     rowOverlapMm: Int,
+    cruiseCorrection: Boolean,
     onTop: (ButtonAction) -> Unit,
     onBottom: (ButtonAction) -> Unit,
     onSmooth: (Boolean) -> Unit,
     onSmoothLevel: (SmoothLevel) -> Unit,
     onCuttingWidth: (Int) -> Unit,
     onRowOverlap: (Int) -> Unit,
+    onCruiseCorrection: (Boolean) -> Unit,
 ) {
     Column(
         Modifier.fillMaxSize().padding(pad).padding(horizontal = 16.dp)
@@ -490,7 +574,7 @@ private fun SettingsTab(
         Card(colors = CardDefaults.cardColors(containerColor = PradomoColors.surface1)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 val pitch = (cuttingWidthMm - rowOverlapMm).coerceAtLeast(20)
-                Text("In Auto mode: hold the big button and push the stick ◀▶ for a K-turn into the next row, or ▲▼ for cruise control.",
+                Text("In Auto mode: gamepad — hold the big button and push the stick ◀▶ (K-turn) or ▲▼ (cruise). Touch — single-tap the joystick's edge.",
                     color = PradomoColors.textSecondary, style = MaterialTheme.typography.labelSmall)
                 StepperRow("Cutting width", "$cuttingWidthMm mm",
                     onMinus = { onCuttingWidth((cuttingWidthMm - 10).coerceIn(100, 600)) },
@@ -503,6 +587,22 @@ private fun SettingsTab(
                     fontWeight = FontWeight.Bold)
                 Text("⚠ Set cutting width to your mower's real value — it drives how far each K-turn shifts over. Validate on the mower before relying on it; the link has no watchdog, so a maneuver only stops on stick touch, E-STOP, or going out of range.",
                     color = PradomoColors.warning, style = MaterialTheme.typography.labelSmall)
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Auto-correct cruise heading", color = PradomoColors.textPrimary,
+                            style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        Text("Hold a straight line on slopes using telemetry. You can always steer with the stick; this adds an automatic hold on top.",
+                            color = PradomoColors.textSecondary, style = MaterialTheme.typography.labelSmall)
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Switch(
+                        checked = cruiseCorrection, onCheckedChange = onCruiseCorrection,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = PradomoColors.bgBase,
+                            checkedTrackColor = PradomoColors.connected,
+                        ),
+                    )
+                }
             }
         }
 
