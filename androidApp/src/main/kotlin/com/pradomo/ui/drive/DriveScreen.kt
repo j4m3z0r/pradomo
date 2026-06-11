@@ -9,7 +9,6 @@ import android.os.Build
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -232,10 +231,10 @@ private fun DriveTab(
             .padding(pad)
             .padding(horizontal = 16.dp)
             .verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Spacer(Modifier.height(2.dp))
-        StatusHeader(connection, telemetry?.battery, telemetry?.rssi)
+        StatusHeader(connection, telemetry?.battery, telemetry?.rssi, telemetry?.statusName)
 
         if (linkLost) {
             Surface(color = PradomoColors.danger, shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
@@ -246,60 +245,74 @@ private fun DriveTab(
             }
         }
 
-        if (maneuverLabel != null) RunningManeuverBanner(maneuverLabel)
-
+        // NOTE: the running-maneuver indicator lives INSIDE DriveCard (the status line under
+        // the joystick + an amber ring) so starting a maneuver never shifts the layout —
+        // E-STOP must not move while the mower is driving itself.
         DriveCard(
-            connected, control, speedMode, joySize, modeGroup, modeSelecting,
+            connected, control, speedMode, joySize, modeGroup, modeSelecting, maneuverLabel,
             onJoystick, onEmergencyStop, onMode, onModeGroup, onEdgeTap,
         )
 
-        // Blade + deck slider cards
-        val blades = BladeSpeed.entries
-        val bladeOn = deck.blade != BladeSpeed.OFF
-        ControlSliderCard(
-            icon = Icons.Outlined.Toys, label = "BLADE SPEED",
-            valueText = deck.blade.label, valueSub = null,
-            valueColor = if (bladeOn) PradomoColors.connected else PradomoColors.textPrimary,
-            index = blades.indexOf(deck.blade).coerceAtLeast(0), count = blades.size,
-            minLabel = "Off", maxLabel = "Turbo", enabled = connected,
-            accent = PradomoColors.connected,
-            onIndex = { onBlade(blades[it]) },
-        )
-        val mm = DeckHeights.MM
-        ControlSliderCard(
-            icon = Icons.Outlined.Height, label = "DECK HEIGHT",
-            valueText = "${deck.heightMm} mm", valueSub = null, valueColor = PradomoColors.textPrimary,
-            index = mm.indexOf(deck.heightMm).coerceAtLeast(0), count = mm.size,
-            minLabel = "${mm.first()} mm", maxLabel = "${mm.last()} mm", enabled = connected,
-            accent = PradomoColors.connected, onIndex = { onHeight(mm[it]) },
-        )
+        // Blade + deck in one compact card so both are reachable without scrolling.
+        Card(colors = CardDefaults.cardColors(containerColor = PradomoColors.surface1)) {
+            Column(Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
+                val blades = BladeSpeed.entries
+                val bladeOn = deck.blade != BladeSpeed.OFF
+                CompactSliderRow(
+                    icon = Icons.Outlined.Toys, label = "BLADE",
+                    valueText = deck.blade.label,
+                    valueColor = if (bladeOn) PradomoColors.connected else PradomoColors.textPrimary,
+                    index = blades.indexOf(deck.blade).coerceAtLeast(0), count = blades.size,
+                    enabled = connected,
+                    onIndex = { onBlade(blades[it]) },
+                )
+                val mm = DeckHeights.MM
+                CompactSliderRow(
+                    icon = Icons.Outlined.Height, label = "DECK",
+                    valueText = "${deck.heightMm} mm", valueColor = PradomoColors.textPrimary,
+                    index = mm.indexOf(deck.heightMm).coerceAtLeast(0), count = mm.size,
+                    enabled = connected,
+                    onIndex = { onHeight(mm[it]) },
+                )
+            }
+        }
 
-        OutlinedButton(
+        TextButton(
             onClick = onEnterPocket,
             enabled = connected && hasGamepad,
-            modifier = Modifier.fillMaxWidth().height(52.dp),
+            modifier = Modifier.fillMaxWidth(),
         ) {
             Text(if (hasGamepad) "POCKET MODE — blank screen, drive by remote" else "POCKET MODE (plug in the remote)",
-                maxLines = 1)
+                maxLines = 1, color = if (connected && hasGamepad) PradomoColors.connected else PradomoColors.textDisabled)
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(4.dp))
     }
 }
 
-/** Slim banner shown while a semi-autonomous maneuver is running, with how to bail out. */
+/** One slider row of the mower card: icon + label left, value right, slider beneath. */
 @Composable
-private fun RunningManeuverBanner(label: String) {
-    Surface(color = PradomoColors.mossDeep, shape = RoundedCornerShape(14.dp),
-        modifier = Modifier.fillMaxWidth()) {
-        Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically) {
-            Text("▶ $label", color = PradomoColors.textPrimary,
-                fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.weight(1f))
-            Text("touch stick to cancel", color = PradomoColors.textSecondary,
-                style = MaterialTheme.typography.labelSmall)
-        }
+private fun CompactSliderRow(
+    icon: ImageVector, label: String, valueText: String, valueColor: Color,
+    index: Int, count: Int, enabled: Boolean, onIndex: (Int) -> Unit,
+) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, null, tint = PradomoColors.connected, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(8.dp))
+        Text(label, color = PradomoColors.textPrimary, fontWeight = FontWeight.Bold,
+            style = MaterialTheme.typography.labelLarge)
+        Spacer(Modifier.weight(1f))
+        Text(valueText, color = valueColor, fontWeight = FontWeight.Bold,
+            style = MaterialTheme.typography.titleSmall, maxLines = 1)
     }
+    Slider(
+        value = index.toFloat(),
+        onValueChange = { onIndex(it.roundToInt().coerceIn(0, count - 1)) },
+        valueRange = 0f..(count - 1).toFloat(),
+        steps = (count - 2).coerceAtLeast(0),
+        enabled = enabled,
+        colors = SliderDefaults.colors(thumbColor = PradomoColors.connected, activeTrackColor = PradomoColors.connected),
+        modifier = Modifier.height(36.dp),
+    )
 }
 
 /**
@@ -318,26 +331,27 @@ private fun ModePager(
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("MODE", color = PradomoColors.textSecondary,
-                style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.width(4.dp))
-            // Tappable dots (swipe also works); tapping a dot jumps to that group.
+            // Labeled pills (tap to switch; swiping the row below also works).
             ControllerModeGroup.entries.forEach { g ->
                 val on = g == group
-                Box(
-                    Modifier.size(22.dp).clickable { onModeGroup(g) },
-                    contentAlignment = Alignment.Center,
+                Surface(
+                    onClick = { onModeGroup(g) },
+                    color = if (on) PradomoColors.mossDeep else Color.Transparent,
+                    shape = RoundedCornerShape(50),
+                    border = if (on) null else androidx.compose.foundation.BorderStroke(1.dp, PradomoColors.hairline),
+                    modifier = Modifier.padding(end = 8.dp),
                 ) {
-                    Box(
-                        Modifier.size(if (on) 9.dp else 6.dp).background(
-                            if (on) PradomoColors.connected else PradomoColors.textSecondary,
-                            RoundedCornerShape(50),
-                        ),
+                    Text(
+                        g.label,
+                        color = if (on) PradomoColors.textPrimary else PradomoColors.textSecondary,
+                        fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                     )
                 }
             }
             Spacer(Modifier.weight(1f))
-            Text(if (selecting) "switching…" else "tap ●○ · swipe ◀▶", color = PradomoColors.textSecondary,
+            Text(if (selecting) "switching…" else "swipe ◀▶", color = PradomoColors.textSecondary,
                 style = MaterialTheme.typography.labelSmall)
         }
         // Horizontal swipe across the strip switches group. A HorizontalPager (or
@@ -372,25 +386,26 @@ private fun ModePager(
     }
 }
 
-/** The Auto-mode page: explains the joystick-edge maneuver taps. */
+/** The Auto-mode page: what the highlighted ring zones (and the gamepad) trigger. */
 @Composable
 private fun AutoLegend() {
     Surface(
         color = PradomoColors.surface2, shape = RoundedCornerShape(12.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text("AUTO — tap the joystick edge", color = PradomoColors.connected,
-                fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge)
-            Text("◀ ▶  K-turn into the next row     ▲ ▼  cruise control",
-                color = PradomoColors.textPrimary, style = MaterialTheme.typography.bodyMedium)
+            Text("◀ ▶  K-turn into the next row      ▲ ▼  cruise",
+                color = PradomoColors.textPrimary, style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Bold)
+            Text("Tap the highlighted ring — or hold the big button and push the stick.",
+                color = PradomoColors.textSecondary, style = MaterialTheme.typography.labelSmall)
         }
     }
 }
 
 @Composable
-private fun StatusHeader(connection: ConnectionState, battery: Int?, rssi: Int?) {
+private fun StatusHeader(connection: ConnectionState, battery: Int?, rssi: Int?, statusName: String?) {
     val (label, color) = when (connection) {
         ConnectionState.Connected -> "CONNECTED" to PradomoColors.connected
         ConnectionState.Connecting -> "CONNECTING…" to PradomoColors.connecting
@@ -401,6 +416,11 @@ private fun StatusHeader(connection: ConnectionState, battery: Int?, rssi: Int?)
         Box(Modifier.size(10.dp).background(color, RoundedCornerShape(50)))
         Spacer(Modifier.width(8.dp))
         Text(label, color = color, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        // The mower's own mode (charging / remote control / …) when it reports one.
+        if (connection == ConnectionState.Connected && statusName != null) {
+            Text(" · " + statusName.replace('_', ' '), color = PradomoColors.textSecondary,
+                style = MaterialTheme.typography.labelLarge, maxLines = 1)
+        }
         Spacer(Modifier.weight(1f))
         val sigColor = when {
             rssi == null -> PradomoColors.textSecondary
@@ -428,6 +448,7 @@ private fun DriveCard(
     joySize: androidx.compose.ui.unit.Dp,
     modeGroup: ControllerModeGroup,
     modeSelecting: Boolean,
+    maneuverLabel: String?,
     onJoystick: (Float, Float) -> Unit,
     onEmergencyStop: () -> Unit,
     onMode: (SpeedMode) -> Unit,
@@ -435,27 +456,34 @@ private fun DriveCard(
     onEdgeTap: (EdgeZone) -> Unit,
 ) {
     val auto = modeGroup == ControllerModeGroup.AUTO
+    val maneuvering = maneuverLabel != null
     Card(colors = CardDefaults.cardColors(containerColor = PradomoColors.surface1)) {
-        Column(Modifier.padding(16.dp)) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
             ModePager(modeGroup, modeSelecting, speedMode, connected, onMode, onModeGroup)
-            Spacer(Modifier.height(14.dp))
+            Spacer(Modifier.height(10.dp))
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                 VirtualJoystick(
                     enabled = connected, drive = control.drive, turn = control.turn,
                     onVector = onJoystick, gateSize = joySize,
                     autoMode = auto, onEdgeTap = onEdgeTap,
+                    maneuverActive = maneuvering,
                 )
             }
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(4.dp))
+            // Fixed-position status line: doubles as the running-maneuver indicator so the
+            // layout (and E-STOP) never moves when autonomous motion starts.
             Text(
                 when {
                     !connected -> "NOT CONNECTED"
-                    auto -> "TAP EDGE FOR MANEUVER · DRAG TO DRIVE"
+                    maneuvering -> "▶ ${maneuverLabel!!.uppercase()} — TOUCH STICK TO CANCEL"
+                    auto -> "DRAG TO DRIVE"
                     else -> "RELEASE TO STOP"
                 },
-                color = PradomoColors.textSecondary, modifier = Modifier.fillMaxWidth(),
+                color = if (maneuvering) PradomoColors.warning else PradomoColors.textSecondary,
+                fontWeight = if (maneuvering) FontWeight.Bold else FontWeight.Normal,
+                modifier = Modifier.fillMaxWidth(),
                 textAlign = TextAlign.Center, style = MaterialTheme.typography.labelMedium)
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(10.dp))
             Button(
                 onClick = onEmergencyStop,
                 modifier = Modifier.fillMaxWidth().height(54.dp),
@@ -487,45 +515,9 @@ private fun SpeedSegmented(mode: SpeedMode, enabled: Boolean, onMode: (SpeedMode
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(m.label, maxLines = 1, style = MaterialTheme.typography.labelLarge)
-                    Text("${m.maxLinear}", style = MaterialTheme.typography.labelSmall,
+                    Text("${(m.maxLinear * 100).roundToInt()}%", style = MaterialTheme.typography.labelSmall,
                         color = PradomoColors.textSecondary)
                 }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ControlSliderCard(
-    icon: ImageVector, label: String, valueText: String, valueSub: String?, valueColor: Color,
-    index: Int, count: Int, minLabel: String, maxLabel: String, enabled: Boolean,
-    accent: Color, onIndex: (Int) -> Unit,
-) {
-    Card(colors = CardDefaults.cardColors(containerColor = PradomoColors.surface1)) {
-        Column(Modifier.padding(16.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Icon(icon, null, tint = accent, modifier = Modifier.size(20.dp))
-                Spacer(Modifier.width(8.dp))
-                Text(label, color = PradomoColors.textPrimary, fontWeight = FontWeight.Bold,
-                    style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.weight(1f))
-                Column(horizontalAlignment = Alignment.End) {
-                    Text(valueText, color = valueColor, fontWeight = FontWeight.Bold,
-                        style = MaterialTheme.typography.titleMedium, maxLines = 1)
-                    valueSub?.let { Text(it, color = accent, style = MaterialTheme.typography.labelSmall) }
-                }
-            }
-            Slider(
-                value = index.toFloat(),
-                onValueChange = { onIndex(it.roundToInt().coerceIn(0, count - 1)) },
-                valueRange = 0f..(count - 1).toFloat(),
-                steps = (count - 2).coerceAtLeast(0),
-                enabled = enabled,
-                colors = SliderDefaults.colors(thumbColor = accent, activeTrackColor = accent),
-            )
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(minLabel, color = PradomoColors.textSecondary, style = MaterialTheme.typography.labelSmall)
-                Text(maxLabel, color = PradomoColors.textSecondary, style = MaterialTheme.typography.labelSmall)
             }
         }
     }
@@ -596,9 +588,9 @@ private fun SettingsTab(
                 Text("Row spacing (pitch): $pitch mm",
                     color = PradomoColors.textPrimary, style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.Bold)
-                Text("Wider turn radius keeps both treads rolling through the K-turn (gentler on grass) but backs up deeper into the mowed row.",
+                Text("Wider turn radius is gentler on grass but backs up deeper into the mowed row.",
                     color = PradomoColors.textSecondary, style = MaterialTheme.typography.labelSmall)
-                Text("⚠ Set cutting width to your mower's real value — it drives how far each K-turn shifts over. Validate on the mower before relying on it; the link has no watchdog, so a maneuver only stops on stick touch, E-STOP, or going out of range.",
+                Text("⚠ Set cutting width to your mower's real value — it sets how far each K-turn shifts over. A maneuver stops only on stick touch, E-STOP, or link loss; validate on your mower first.",
                     color = PradomoColors.warning, style = MaterialTheme.typography.labelSmall)
             }
         }

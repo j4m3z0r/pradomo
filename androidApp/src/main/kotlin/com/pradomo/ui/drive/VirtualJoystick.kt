@@ -43,6 +43,7 @@ fun VirtualJoystick(
     gateSize: Dp = Dimens.joystickGate,
     autoMode: Boolean = false,
     onEdgeTap: (EdgeZone) -> Unit = {},
+    maneuverActive: Boolean = false,
 ) {
     val density = LocalDensity.current
     val gatePx = with(density) { gateSize.toPx() }
@@ -119,12 +120,35 @@ fun VirtualJoystick(
             ),
             radius = r, center = c,
         )
-        // In Auto mode brighten the rim to signal the edges are tappable.
-        val rimColor = if (autoMode && enabled) PradomoColors.connected else PradomoColors.hairline
-        drawCircle(color = rimColor, radius = r, center = c, style = Stroke((if (autoMode) 2.5 else 1.5).dp.toPx()))
-        // Four direction ticks (accent + longer in Auto mode: these are the tap targets).
         val auto = autoMode && enabled
+        // In Auto mode, make the tappable edge zones visible: a soft band segment at each
+        // of the four edges (these are the maneuver "buttons").
+        if (auto) {
+            val band = r * 0.40f
+            val bandR = r - band / 2f - 1.dp.toPx()
+            val zone = (if (maneuverActive) PradomoColors.warning else PradomoColors.connected).copy(alpha = 0.13f)
+            for (centerDeg in listOf(0f, 90f, 180f, 270f)) {
+                drawArc(
+                    color = zone,
+                    startAngle = centerDeg - 27f,
+                    sweepAngle = 54f,
+                    useCenter = false,
+                    topLeft = Offset(c.x - bandR, c.y - bandR),
+                    size = androidx.compose.ui.geometry.Size(bandR * 2f, bandR * 2f),
+                    style = Stroke(width = band),
+                )
+            }
+        }
+        // Rim: amber while a maneuver is driving the mower, bright in Auto mode (tappable).
+        val rimColor = when {
+            maneuverActive -> PradomoColors.warning
+            auto -> PradomoColors.connected
+            else -> PradomoColors.hairline
+        }
+        drawCircle(color = rimColor, radius = r, center = c, style = Stroke((if (auto || maneuverActive) 2.5 else 1.5).dp.toPx()))
+        // Four direction ticks (accent + longer in Auto mode: these mark the tap zones).
         val tickColor = when {
+            maneuverActive -> PradomoColors.warning
             auto -> PradomoColors.connected
             enabled -> PradomoColors.textSecondary
             else -> PradomoColors.textDisabled
