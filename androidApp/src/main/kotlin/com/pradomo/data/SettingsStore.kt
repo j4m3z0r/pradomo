@@ -30,6 +30,8 @@ class SettingsStore(private val context: Context) {
     private val keyRowOverlap = intPreferencesKey("row_overlap_mm")
     private val keyModeGroup = stringPreferencesKey("controller_mode_group")
     private val keyCruiseCorrection = booleanPreferencesKey("cruise_correction")
+    private val keyTurnRadius = intPreferencesKey("turn_radius_mm")
+    private val keyHeadingAssist = booleanPreferencesKey("heading_assist")
 
     val deckHeightMm: Flow<Int> = context.dataStore.data.map { it[keyDeck] ?: DEFAULT_DECK_MM }
     val topButton: Flow<ButtonAction> = context.dataStore.data.map { it.action(keyTop, ButtonAction.SLOW) }
@@ -47,8 +49,13 @@ class SettingsStore(private val context: Context) {
         prefs[keyModeGroup]?.let { runCatching { ControllerModeGroup.valueOf(it) }.getOrNull() }
             ?: ControllerModeGroup.SPEED
     }
-    /** Auto-correct cruise heading (hold a straight line on slopes). Off by default. */
-    val cruiseCorrection: Flow<Boolean> = context.dataStore.data.map { it[keyCruiseCorrection] ?: false }
+    /** Auto-correct cruise heading (hold a straight line on slopes). On by default —
+     * the real mower demonstrably can't track straight on constant motor commands. */
+    val cruiseCorrection: Flow<Boolean> = context.dataStore.data.map { it[keyCruiseCorrection] ?: true }
+    /** K-turn arc radius (mm); wider is gentler on the grass but backs up deeper. */
+    val turnRadiusMm: Flow<Int> = context.dataStore.data.map { it[keyTurnRadius] ?: DEFAULT_TURN_RADIUS_MM }
+    /** Heading-hold assist for manual driving (experimental). Off by default. */
+    val headingAssist: Flow<Boolean> = context.dataStore.data.map { it[keyHeadingAssist] ?: false }
 
     suspend fun setDeckHeightMm(mm: Int) = context.dataStore.edit { it[keyDeck] = mm }
     suspend fun setTopButton(a: ButtonAction) = context.dataStore.edit { it[keyTop] = a.name }
@@ -59,6 +66,8 @@ class SettingsStore(private val context: Context) {
     suspend fun setRowOverlapMm(mm: Int) = context.dataStore.edit { it[keyRowOverlap] = mm }
     suspend fun setModeGroup(g: ControllerModeGroup) = context.dataStore.edit { it[keyModeGroup] = g.name }
     suspend fun setCruiseCorrection(on: Boolean) = context.dataStore.edit { it[keyCruiseCorrection] = on }
+    suspend fun setTurnRadiusMm(mm: Int) = context.dataStore.edit { it[keyTurnRadius] = mm }
+    suspend fun setHeadingAssist(on: Boolean) = context.dataStore.edit { it[keyHeadingAssist] = on }
 
     private fun androidx.datastore.preferences.core.Preferences.action(
         key: androidx.datastore.preferences.core.Preferences.Key<String>,
@@ -71,6 +80,7 @@ class SettingsStore(private val context: Context) {
         // rows. The Lymow's true cutting width has not been measured yet.
         const val DEFAULT_CUTTING_WIDTH_MM = 200
         const val DEFAULT_ROW_OVERLAP_MM = 20
+        const val DEFAULT_TURN_RADIUS_MM = 450
         // Physical controller keycodes: top (smaller) = BUTTON_B, bottom (larger) = BUTTON_A.
         const val KEYCODE_TOP = 97
         const val KEYCODE_BOTTOM = 96

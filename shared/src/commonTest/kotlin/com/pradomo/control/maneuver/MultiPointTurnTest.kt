@@ -4,16 +4,19 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.hypot
-import kotlin.math.sign
 import kotlin.math.sin
 import kotlin.test.Test
 import kotlin.test.assertTrue
 
 /**
- * Differential-drive kinematic sim, identical to the demo mower's integration
+ * Differential-drive kinematic sim matching the demo mower's integration
  * (FakeMowerTransport): heading += ω·dt; x += v·cosθ·dt; y += v·sinθ·dt, where
- * v = drive·linearScale and ω = turn·turnScale. An optional [minRadius] models a mower
- * that physically can't turn as tight as commanded (ω is clamped down).
+ * v = drive·linearScale and ω = turn·turnScale.
+ *
+ * [omegaScale] models a mower whose real turn rate differs from the commanded model
+ * (what we saw on hardware), and the telemetry [delay] in [run] models sensor lag —
+ * together they reproduce the consistent end-heading error observed on the real lawn,
+ * which the trim phase must correct.
  */
 private class DiffDriveSim(
     var x: Float,
@@ -21,14 +24,11 @@ private class DiffDriveSim(
     var heading: Float,
     val linearScale: Float = 0.5f,
     val turnScale: Float = 0.6f,
-    val minRadius: Float = 0f,
+    val omegaScale: Float = 1f,
 ) {
     fun apply(cmd: ManeuverCommand, dt: Float) {
         val v = cmd.drive * linearScale
-        var w = cmd.turn * turnScale
-        if (minRadius > 0f && w != 0f && v != 0f && abs(v / w) < minRadius) {
-            w = sign(w) * abs(v) / minRadius
-        }
+        val w = cmd.turn * turnScale * omegaScale
         heading += w * dt
         x += v * cos(heading) * dt
         y += v * sin(heading) * dt
@@ -39,11 +39,25 @@ private class DiffDriveSim(
 
 private const val DT = 0.04f
 
-/** Run a maneuver to completion (or a step cap) and return the final sim pose. */
-private fun run(sim: DiffDriveSim, m: Maneuver, maxIter: Int = 4000): Pose {
+/** Per-step record of what the maneuver commanded, for behavioral assertions. */
+private class Trace {
+    val commands = mutableListOf<ManeuverCommand>()
+    val path = mutableListOf<Pose>()
+}
+
+/**
+ * Run a maneuver to completion (or a step cap); the maneuver sees telemetry [delay]
+ * steps old. Returns the final sim pose.
+ */
+private fun run(sim: DiffDriveSim, m: Maneuver, delay: Int = 0, trace: Trace? = null, maxIter: Int = 6000): Pose {
+    val queue = ArrayDeque<Pose>()
     repeat(maxIter) {
-        val cmd = m.step(sim.pose(), DT)
+        queue.addLast(sim.pose())
+        val seen = if (queue.size > delay) queue.removeFirst() else queue.first()
+        val cmd = m.step(seen, DT)
         if (cmd.done) return sim.pose()
+        trace?.commands?.add(cmd)
+        trace?.path?.add(sim.pose())
         sim.apply(cmd, DT)
     }
     return sim.pose()
@@ -60,74 +74,82 @@ private fun headingErr(a: Float, b: Float) = abs(angleDelta(a, b))
 
 class MultiPointTurnTest {
 
-    @Test fun left_turn_wide_pitch_single_arc_lands_one_pitch_over() {
-        // pitch >= 2*minRadius -> a single forward semicircle.
-        val start = Pose(2f, 1f, 0.5f)
-        val sim = DiffDriveSim(start.x, start.y, start.heading)
-        val pitch = 0.6f
-        val end = run(sim, MultiPointTurn(TurnDirection.LEFT, pitch))
-        val t = target(start, TurnDirection.LEFT, pitch)
-        assertTrue(hypot(end.x - t.x, end.y - t.y) <= 0.12f, "pos off: end=$end target=$t")
-        assertTrue(headingErr(end.heading, t.heading) <= 0.12f, "heading off: $end vs $t")
-    }
-
-    @Test fun left_turn_tight_pitch_three_point_lands_one_pitch_over() {
-        // pitch < 2*minRadius -> genuine 3-point turn (forward, reverse, forward).
-        val start = Pose(-3f, 5f, 2.2f)
-        val sim = DiffDriveSim(start.x, start.y, start.heading)
-        val pitch = 0.2f
-        val end = run(sim, MultiPointTurn(TurnDirection.LEFT, pitch))
-        val t = target(start, TurnDirection.LEFT, pitch)
-        assertTrue(hypot(end.x - t.x, end.y - t.y) <= 0.12f, "pos off: end=$end target=$t")
-        assertTrue(headingErr(end.heading, t.heading) <= 0.12f, "heading off: $end vs $t")
-    }
-
-    @Test fun right_turn_mirrors_left() {
-        val start = Pose(0f, 0f, 0f)
-        val sim = DiffDriveSim(start.x, start.y, start.heading)
-        val pitch = 0.3f
-        val end = run(sim, MultiPointTurn(TurnDirection.RIGHT, pitch))
-        val t = target(start, TurnDirection.RIGHT, pitch)
-        assertTrue(hypot(end.x - t.x, end.y - t.y) <= 0.12f, "pos off: end=$end target=$t")
-        assertTrue(headingErr(end.heading, t.heading) <= 0.12f, "heading off: $end vs $t")
-        // A right turn must end on the right side of travel (negative v in the start frame).
-        val v = -(end.x - start.x) * sin(start.heading) + (end.y - start.y) * cos(start.heading)
-        assertTrue(v < 0f, "expected rightward lateral shift, got v=$v")
-    }
-
-    @Test fun converges_across_a_range_of_pitches() {
-        for (pitchCm in intArrayOf(0, 5, 15, 25, 40, 60, 90)) {
-            val pitch = pitchCm / 100f
-            val start = Pose(1f, 2f, 0.9f)
-            val sim = DiffDriveSim(start.x, start.y, start.heading)
-            val end = run(sim, MultiPointTurn(TurnDirection.LEFT, pitch))
-            val t = target(start, TurnDirection.LEFT, pitch)
-            assertTrue(
-                hypot(end.x - t.x, end.y - t.y) <= 0.12f && headingErr(end.heading, t.heading) <= 0.12f,
-                "pitch=${pitch}m did not converge: end=$end target=$t",
-            )
+    @Test fun converges_across_pitches_directions_and_radii() {
+        for (dir in TurnDirection.entries) {
+            for (radiusCm in intArrayOf(30, 45, 60)) {
+                for (pitchCm in intArrayOf(0, 5, 18, 30, 45, 60)) {
+                    val pitch = pitchCm / 100f
+                    val start = Pose(1f, 2f, 0.9f)
+                    val sim = DiffDriveSim(start.x, start.y, start.heading)
+                    val end = run(sim, MultiPointTurn(dir, pitch, MultiPointTurn.Params(turnRadius = radiusCm / 100f)))
+                    val t = target(start, dir, pitch)
+                    assertTrue(
+                        hypot(end.x - t.x, end.y - t.y) <= 0.15f,
+                        "dir=$dir R=${radiusCm}cm pitch=${pitchCm}cm pos off: end=$end target=$t",
+                    )
+                    assertTrue(
+                        headingErr(end.heading, t.heading) <= 0.05f,
+                        "dir=$dir R=${radiusCm}cm pitch=${pitchCm}cm heading off: end=$end target=$t",
+                    )
+                }
+            }
         }
     }
 
-    @Test fun terminates_and_reverses_heading_even_when_min_radius_infeasible() {
-        // Mower physically can't turn tighter than 0.45m, but the plan wants 0.25m.
-        // It can't hit the lateral target, but it must still finish with heading reversed
-        // (no spinning forever).
-        val start = Pose(4f, 4f, 1.0f)
-        val sim = DiffDriveSim(start.x, start.y, start.heading, minRadius = 0.45f)
-        val end = run(sim, MultiPointTurn(TurnDirection.LEFT, 0.2f))
-        val t = target(start, TurnDirection.LEFT, 0.2f)
-        assertTrue(headingErr(end.heading, t.heading) <= 0.2f, "heading not reversed: $end vs $t")
-    }
-
-    @Test fun cruise_holds_a_steady_command_and_never_self_completes() {
+    @Test fun backs_up_first() {
+        // The maneuver starts at the row end: its first motion must be in reverse,
+        // using the already-mowed row behind as workspace.
         val sim = DiffDriveSim(0f, 0f, 0f)
-        val cruise = CruiseManeuver(0.5f)
-        repeat(50) {
-            val cmd = cruise.step(sim.pose(), DT)
-            assertTrue(!cmd.done && cmd.drive == 0.5f && cmd.turn == 0f)
-            sim.apply(cmd, DT)
+        val trace = Trace()
+        run(sim, MultiPointTurn(TurnDirection.LEFT, 0.18f), trace = trace)
+        val first = trace.commands.first { it.drive != 0f || it.turn != 0f }
+        assertTrue(first.drive < 0f, "first command should reverse, got $first")
+    }
+
+    @Test fun never_pivots_both_treads_keep_rolling() {
+        // Whenever the maneuver commands a turn it must also command real longitudinal
+        // motion — a near-stationary inner tread is what tore up the lawn.
+        for (pitchCm in intArrayOf(0, 18, 45)) {
+            val sim = DiffDriveSim(0f, 0f, 1.2f)
+            val trace = Trace()
+            run(sim, MultiPointTurn(TurnDirection.RIGHT, pitchCm / 100f), trace = trace)
+            for (cmd in trace.commands) {
+                if (abs(cmd.turn) > 0.1f) {
+                    assertTrue(abs(cmd.drive) >= 0.25f, "pivot-like command at pitch=${pitchCm}cm: $cmd")
+                }
+            }
         }
-        assertTrue(sim.x > 0f, "cruise should have moved the mower forward")
+    }
+
+    @Test fun heading_exact_despite_turn_rate_model_error_and_telemetry_lag() {
+        // The hardware finding: open-loop rotation tracking ends on the wrong heading.
+        // With the mower turning 30% faster/slower than modeled AND telemetry 3 samples
+        // stale, the trim+settle phase must still land within ~2.5° of start+180°.
+        for (omegaScale in floatArrayOf(0.75f, 1.3f)) {
+            for (dir in TurnDirection.entries) {
+                val start = Pose(4f, 4f, 2.2f)
+                val sim = DiffDriveSim(start.x, start.y, start.heading, omegaScale = omegaScale)
+                val end = run(sim, MultiPointTurn(dir, 0.18f), delay = 3)
+                val t = target(start, dir, 0.18f)
+                assertTrue(
+                    headingErr(end.heading, t.heading) <= 0.045f,
+                    "omegaScale=$omegaScale dir=$dir heading off: end=${end.heading} target=${t.heading}",
+                )
+            }
+        }
+    }
+
+    @Test fun forward_overrun_of_row_end_is_small() {
+        // The user allows a small overrun past the row-end line, but it must stay a
+        // modest fraction of the turn radius (not sweep deep into the boundary).
+        val radius = 0.45f
+        val start = Pose(0f, 0f, 0.7f)
+        val sim = DiffDriveSim(start.x, start.y, start.heading)
+        val trace = Trace()
+        run(sim, MultiPointTurn(TurnDirection.LEFT, 0.18f, MultiPointTurn.Params(turnRadius = radius)), trace = trace)
+        val maxU = trace.path.maxOf { p ->
+            (p.x - start.x) * cos(start.heading) + (p.y - start.y) * sin(start.heading)
+        }
+        assertTrue(maxU <= 0.6f * radius, "overran the row end by ${maxU}m (limit ${0.6f * radius}m)")
     }
 }

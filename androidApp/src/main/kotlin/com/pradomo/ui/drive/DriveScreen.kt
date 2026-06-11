@@ -94,6 +94,8 @@ fun DriveScreen(
     val cuttingWidthMm by vm.cuttingWidthMm.collectAsStateWithLifecycle()
     val rowOverlapMm by vm.rowOverlapMm.collectAsStateWithLifecycle()
     val cruiseCorrection by vm.cruiseCorrection.collectAsStateWithLifecycle()
+    val turnRadiusMm by vm.turnRadiusMm.collectAsStateWithLifecycle()
+    val headingAssist by vm.headingAssist.collectAsStateWithLifecycle()
 
     var pocketMode by remember { mutableStateOf(false) }
     var tab by remember { mutableStateOf(Tab.DRIVE) }
@@ -183,13 +185,15 @@ fun DriveScreen(
                 Tab.MAP -> MapView(pad, trail, state.telemetry, onClear = vm::clearMap)
                 Tab.SETTINGS -> SettingsTab(
                     pad, gamepad, topButton, bottomButton, smoothEnabled, smoothLevel,
-                    cuttingWidthMm, rowOverlapMm, cruiseCorrection,
+                    cuttingWidthMm, rowOverlapMm, cruiseCorrection, turnRadiusMm, headingAssist,
                     onTop = vm::setTopButton, onBottom = vm::setBottomButton,
                     onSmooth = vm::setSmoothEnabled,
                     onSmoothLevel = vm::setSmoothLevel,
                     onCuttingWidth = vm::setCuttingWidthMm,
                     onRowOverlap = vm::setRowOverlapMm,
                     onCruiseCorrection = vm::setCruiseCorrection,
+                    onTurnRadius = vm::setTurnRadiusMm,
+                    onHeadingAssist = vm::setHeadingAssist,
                 )
             }
         }
@@ -538,6 +542,8 @@ private fun SettingsTab(
     cuttingWidthMm: Int,
     rowOverlapMm: Int,
     cruiseCorrection: Boolean,
+    turnRadiusMm: Int,
+    headingAssist: Boolean,
     onTop: (ButtonAction) -> Unit,
     onBottom: (ButtonAction) -> Unit,
     onSmooth: (Boolean) -> Unit,
@@ -545,6 +551,8 @@ private fun SettingsTab(
     onCuttingWidth: (Int) -> Unit,
     onRowOverlap: (Int) -> Unit,
     onCruiseCorrection: (Boolean) -> Unit,
+    onTurnRadius: (Int) -> Unit,
+    onHeadingAssist: (Boolean) -> Unit,
 ) {
     Column(
         Modifier.fillMaxSize().padding(pad).padding(horizontal = 16.dp)
@@ -582,27 +590,32 @@ private fun SettingsTab(
                 StepperRow("Row overlap", "$rowOverlapMm mm",
                     onMinus = { onRowOverlap((rowOverlapMm - 5).coerceIn(0, 150)) },
                     onPlus = { onRowOverlap((rowOverlapMm + 5).coerceIn(0, 150)) })
+                StepperRow("Turn radius", "$turnRadiusMm mm",
+                    onMinus = { onTurnRadius((turnRadiusMm - 25).coerceIn(250, 700)) },
+                    onPlus = { onTurnRadius((turnRadiusMm + 25).coerceIn(250, 700)) })
                 Text("Row spacing (pitch): $pitch mm",
                     color = PradomoColors.textPrimary, style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.Bold)
+                Text("Wider turn radius keeps both treads rolling through the K-turn (gentler on grass) but backs up deeper into the mowed row.",
+                    color = PradomoColors.textSecondary, style = MaterialTheme.typography.labelSmall)
                 Text("⚠ Set cutting width to your mower's real value — it drives how far each K-turn shifts over. Validate on the mower before relying on it; the link has no watchdog, so a maneuver only stops on stick touch, E-STOP, or going out of range.",
                     color = PradomoColors.warning, style = MaterialTheme.typography.labelSmall)
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Auto-correct cruise heading", color = PradomoColors.textPrimary,
-                            style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                        Text("Hold a straight line on slopes using telemetry. You can always steer with the stick; this adds an automatic hold on top.",
-                            color = PradomoColors.textSecondary, style = MaterialTheme.typography.labelSmall)
-                    }
-                    Spacer(Modifier.width(12.dp))
-                    Switch(
-                        checked = cruiseCorrection, onCheckedChange = onCruiseCorrection,
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = PradomoColors.bgBase,
-                            checkedTrackColor = PradomoColors.connected,
-                        ),
-                    )
-                }
+            }
+        }
+
+        SectionHeader("STEERING ASSIST")
+        Card(colors = CardDefaults.cardColors(containerColor = PradomoColors.surface1)) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                AssistSwitchRow(
+                    title = "Auto-correct cruise heading",
+                    body = "Hold a straight line in cruise using telemetry — the mower can't track straight on its own. You can always steer with the stick; this adds an automatic hold on top.",
+                    checked = cruiseCorrection, onChange = onCruiseCorrection,
+                )
+                AssistSwitchRow(
+                    title = "Heading hold (manual driving)",
+                    body = "Experimental: while you drive with the stick straight, keep pointing the same way (counters slopes and tread slip). Steering releases it instantly.",
+                    checked = headingAssist, onChange = onHeadingAssist,
+                )
             }
         }
 
@@ -643,6 +656,25 @@ private fun SettingsTab(
             }
         }
         Spacer(Modifier.height(8.dp))
+    }
+}
+
+@Composable
+private fun AssistSwitchRow(title: String, body: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, color = PradomoColors.textPrimary,
+                style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(body, color = PradomoColors.textSecondary, style = MaterialTheme.typography.labelSmall)
+        }
+        Spacer(Modifier.width(12.dp))
+        Switch(
+            checked = checked, onCheckedChange = onChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = PradomoColors.bgBase,
+                checkedTrackColor = PradomoColors.connected,
+            ),
+        )
     }
 }
 

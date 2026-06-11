@@ -10,6 +10,7 @@ import com.pradomo.ble.FakeMowerTransport
 import com.pradomo.control.ButtonAction
 import com.pradomo.control.ConnectionState
 import com.pradomo.control.ControllerModeGroup
+import com.pradomo.control.HeadingHold
 import com.pradomo.control.MowerController
 import com.pradomo.control.MowerState
 import com.pradomo.control.SmoothLevel
@@ -92,9 +93,16 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
     val cuttingWidthMm: StateFlow<Int> = _cuttingWidthMm.asStateFlow()
     private val _rowOverlapMm = MutableStateFlow(SettingsStore.DEFAULT_ROW_OVERLAP_MM)
     val rowOverlapMm: StateFlow<Int> = _rowOverlapMm.asStateFlow()
-    /** Opt-in: auto-correct cruise heading to hold a straight line (e.g. on slopes). */
-    private val _cruiseCorrection = MutableStateFlow(false)
+    /** Auto-correct cruise heading to hold a straight line (default on; toggleable). */
+    private val _cruiseCorrection = MutableStateFlow(true)
     val cruiseCorrection: StateFlow<Boolean> = _cruiseCorrection.asStateFlow()
+    /** K-turn arc radius (mm); wider is gentler on the grass. */
+    private val _turnRadiusMm = MutableStateFlow(SettingsStore.DEFAULT_TURN_RADIUS_MM)
+    val turnRadiusMm: StateFlow<Int> = _turnRadiusMm.asStateFlow()
+    /** Heading-hold steering assist for manual driving (experimental, default off). */
+    private val _headingAssist = MutableStateFlow(false)
+    val headingAssist: StateFlow<Boolean> = _headingAssist.asStateFlow()
+    private val headingHold = HeadingHold()
 
     private val settings = SettingsStore(app)
 
@@ -127,6 +135,8 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
             _rowOverlapMm.value = settings.rowOverlapMm.first()
             _modeGroup.value = settings.modeGroup.first()
             _cruiseCorrection.value = settings.cruiseCorrection.first()
+            _turnRadiusMm.value = settings.turnRadiusMm.first()
+            _headingAssist.value = settings.headingAssist.first()
         }
     }
 
@@ -176,12 +186,13 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
                     // Normal manual driving (smoothed toward the stick, or raw).
                     else -> {
                         val target = _control.value
-                        val (dr, tu) = if (_smoothEnabled.value) {
+                        val (dr, tuRaw) = if (_smoothEnabled.value) {
                             smoother.step(target.drive, target.turn, dt)
                         } else {
                             smoother.reset(target.drive, target.turn) // keep synced for seamless enable
                             target.drive to target.turn
                         }
+                        val tu = applyHeadingAssist(target, dr, tuRaw)
                         if (dr != 0f || tu != 0f) {
                             runCatching { controller?.drive(dr, tu) }
                             lastSentNonzero = true
@@ -272,6 +283,26 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
         if (v.drive == 0f && v.turn == 0f && !_smoothEnabled.value) {
             viewModelScope.launch { runCatching { controller?.stop() } }
         }
+    }
+
+    /**
+     * Heading-hold assist for manual driving: when enabled and the user is driving
+     * with the stick laterally centred, latch the heading and steer to keep it (slope/
+     * slip compensation). Any deliberate steering or stopping releases the latch.
+     */
+    private fun applyHeadingAssist(target: ControlVector, dr: Float, tu: Float): Float {
+        if (!_headingAssist.value) {
+            headingHold.unlatch()
+            return tu
+        }
+        val heading = _state.value.telemetry?.heading
+        val steering = abs(target.turn) >= ASSIST_TURN_DEADZONE
+        if (heading == null || steering || abs(dr) < ASSIST_MIN_DRIVE) {
+            headingHold.unlatch()
+            return tu
+        }
+        if (!headingHold.isLatched) headingHold.latch(heading)
+        return headingHold.correction(heading)
     }
 
     /** On-screen speed selector: sets the base mode (held buttons still override). */
@@ -394,6 +425,7 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
                 MultiPointTurn.Params(
                     turnScale = TURN_LIMIT,
                     linearScale = controller?.maxLinear ?: SpeedMode.NORMAL.maxLinear,
+                    turnRadius = _turnRadiusMm.value / 1000f,
                 ),
             ),
         )
@@ -489,6 +521,19 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
         persist { settings.setCruiseCorrection(on) }
     }
 
+    /** K-turn arc radius (mm). */
+    fun setTurnRadiusMm(mm: Int) {
+        _turnRadiusMm.value = mm
+        persist { settings.setTurnRadiusMm(mm) }
+    }
+
+    /** Toggle heading-hold steering assist for manual driving. */
+    fun setHeadingAssist(on: Boolean) {
+        if (!on) headingHold.unlatch()
+        _headingAssist.value = on
+        persist { settings.setHeadingAssist(on) }
+    }
+
     private fun persist(block: suspend () -> Unit) {
         viewModelScope.launch { runCatching { block() } }
     }
@@ -562,6 +607,8 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
         const val AUTO_TRIGGER_DEADZONE = 0.5f // deliberate push to start a maneuver
         const val CRUISE_DRIVE = 0.6f    // normalized cruise speed (~0.3 m/s in Normal)
         const val CRUISE_DISENGAGE_DRIVE = 0.5f // fwd/back past this disengages cruise
+        const val ASSIST_TURN_DEADZONE = 0.1f // user steering past this releases heading hold
+        const val ASSIST_MIN_DRIVE = 0.1f     // heading hold only engages while driving
     }
 }
 
