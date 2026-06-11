@@ -53,9 +53,9 @@ class MultiPointTurn(
         val linearScale: Float = 0.5f,   // m/s at drive = 1.0 (current SpeedMode.maxLinear)
         val turnRadius: Float = 0.45f,   // grass-safe arc radius (m); wider = gentler
         val headingTolerance: Float = 0.035f, // ~2° — the "exactly reversed" guarantee
-        val kTrim: Float = 2.5f,         // trim servo gain (turn per rad of heading error)
-        val minTrimTurn: Float = 0.2f,   // floor so trim overcomes motor deadband
-        val settleTicks: Int = 4,        // ticks stopped-in-tolerance before done
+        val kTrim: Float = 2.0f,         // trim servo gain (sim-tuned: gentler avoids overshoot under lag)
+        val minTrimTurn: Float = 0.15f,  // floor so trim overcomes motor deadband
+        val settleTicks: Int = 3,        // ticks stopped-in-tolerance before done (kept robust for exact heading)
         val maxSteps: Int = 2000,        // hard safety cap (~160s at 80ms) → finish
     )
 
@@ -156,7 +156,7 @@ class MultiPointTurn(
 }
 
 /** Smallest signed rotation (radians) from [from] to [to], in (−π, π]. */
-internal fun angleDelta(from: Float, to: Float): Float {
+fun angleDelta(from: Float, to: Float): Float {
     var d = (to - from) % (2f * PI.toFloat())
     if (d <= -PI.toFloat()) d += 2f * PI.toFloat()
     if (d > PI.toFloat()) d -= 2f * PI.toFloat()

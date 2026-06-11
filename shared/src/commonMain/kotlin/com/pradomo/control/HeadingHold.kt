@@ -12,9 +12,12 @@ import com.pradomo.control.maneuver.angleDelta
  * whether driving forward or in reverse. The caller latches/unlatches around user
  * steering; this class is pure state + math.
  */
+// Defaults raised from sim tuning (sim/) — heading hold needs authority to counter slope
+// yaw; kHead/turnCap held below the sim optimum (which pinned to the search ceiling)
+// pending hardware validation.
 class HeadingHold(
-    private val kHead: Float = 1.2f,   // turn per radian of heading error
-    private val turnCap: Float = 0.4f, // gentle cap on the corrective turn
+    private val kHead: Float = 2.5f,   // turn per radian of heading error
+    private val turnCap: Float = 0.6f, // cap on the corrective turn
 ) {
     private var latched: Float? = null
 

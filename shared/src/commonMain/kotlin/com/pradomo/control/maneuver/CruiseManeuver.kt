@@ -25,11 +25,15 @@ class CruiseManeuver(
     private val gains: Gains = Gains(),
 ) : Maneuver {
 
+    // Defaults tuned in the off-app simulator (sim/) against the measured ~1.6 Hz telemetry
+    // + slope/slip/actuation-lag sweep; stronger correction than the originals because the
+    // real mower needs real authority to hold a line. turnCap held one notch below the
+    // sim optimum pending hardware validation.
     data class Gains(
-        val kCross: Float = 1.5f,   // lean angle per metre of cross-track error (rad/m, via atan)
-        val leanCap: Float = 0.6f,  // max lean toward the line (radians, ~34°)
-        val kHead: Float = 1.2f,    // turn per radian of heading error
-        val turnCap: Float = 0.4f,  // max |turn| the auto-correction commands (gentle)
+        val kCross: Float = 4.0f,   // lean angle per metre of cross-track error (rad/m, via atan)
+        val leanCap: Float = 0.8f,  // max lean toward the line (radians, ~46°)
+        val kHead: Float = 1.6f,    // turn per radian of heading error
+        val turnCap: Float = 0.6f,  // max |turn| the auto-correction commands
     )
 
     private val drive = drive.coerceIn(-1f, 1f)
