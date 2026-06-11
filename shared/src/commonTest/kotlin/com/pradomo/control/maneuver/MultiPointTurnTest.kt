@@ -70,6 +70,13 @@ private fun target(start: Pose, dir: TurnDirection, pitch: Float): Pose {
     return Pose(start.x + s * pitch * nx, start.y + s * pitch * ny, start.heading + s * PI.toFloat())
 }
 
+/** Lateral offset from the target ROW LINE (what matters for gap-free rows; the maneuver
+ * may legitimately end anywhere ALONG the new row, e.g. after the acquire phase). */
+private fun lateralErr(end: Pose, t: Pose): Float {
+    val dx = cos(t.heading); val dy = sin(t.heading)
+    return abs(dx * (end.y - t.y) - dy * (end.x - t.x))
+}
+
 private fun headingErr(a: Float, b: Float) = abs(angleDelta(a, b))
 
 class MultiPointTurnTest {
@@ -84,8 +91,8 @@ class MultiPointTurnTest {
                     val end = run(sim, MultiPointTurn(dir, pitch, MultiPointTurn.Params(turnRadius = radiusCm / 100f)))
                     val t = target(start, dir, pitch)
                     assertTrue(
-                        hypot(end.x - t.x, end.y - t.y) <= 0.15f,
-                        "dir=$dir R=${radiusCm}cm pitch=${pitchCm}cm pos off: end=$end target=$t",
+                        lateralErr(end, t) <= 0.08f,
+                        "dir=$dir R=${radiusCm}cm pitch=${pitchCm}cm off the row line: end=$end target=$t",
                     )
                     assertTrue(
                         headingErr(end.heading, t.heading) <= 0.05f,
@@ -106,16 +113,21 @@ class MultiPointTurnTest {
         assertTrue(first.drive < 0f, "first command should reverse, got $first")
     }
 
-    @Test fun never_pivots_both_treads_keep_rolling() {
-        // Whenever the maneuver commands a turn it must also command real longitudinal
-        // motion — a near-stationary inner tread is what tore up the lawn.
+    @Test fun never_pivots_commanded_radius_stays_grass_safe() {
+        // Whatever the phase (legs, trim, acquire — including the slowed approach), the
+        // commanded arc radius drive·linearScale/(turn·turnScale) must never drop below
+        // the grass-safe turn radius: a tightening arc is what tears the lawn, not slow
+        // speed per se (slowing both treads together preserves the rolling ratio).
+        val prm = MultiPointTurn.Params()
         for (pitchCm in intArrayOf(0, 18, 45)) {
             val sim = DiffDriveSim(0f, 0f, 1.2f)
             val trace = Trace()
-            run(sim, MultiPointTurn(TurnDirection.RIGHT, pitchCm / 100f), trace = trace)
+            run(sim, MultiPointTurn(TurnDirection.RIGHT, pitchCm / 100f, prm), trace = trace)
             for (cmd in trace.commands) {
-                if (abs(cmd.turn) > 0.1f) {
-                    assertTrue(abs(cmd.drive) >= 0.25f, "pivot-like command at pitch=${pitchCm}cm: $cmd")
+                if (abs(cmd.turn) > 0.05f) {
+                    val radius = abs(cmd.drive) * prm.linearScale / (abs(cmd.turn) * prm.turnScale)
+                    assertTrue(radius >= 0.8f * prm.turnRadius,
+                        "arc tighter than grass-safe at pitch=${pitchCm}cm: $cmd (R=$radius)")
                 }
             }
         }

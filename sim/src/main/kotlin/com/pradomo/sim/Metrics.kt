@@ -13,9 +13,9 @@ import kotlin.math.sqrt
 /** Per-run metrics on the TRUE path (not what the controller saw). Lower balanced = better. */
 data class Metrics(
     val headingErrRad: Float = 0f,   // K-turn: |end heading − (start+π)|
-    val placementErrM: Float = 0f,   // K-turn: distance from the one-pitch-over target point
+    val placementErrM: Float = 0f,   // K-turn: LATERAL offset from the target row line
     val overrunM: Float = 0f,        // K-turn: max forward excursion past the row-end line
-    val minTreadFrac: Float = 1f,    // K-turn: min over turning steps of min(|vL|,|vR|)/maxTread
+    val scrubFrac: Float = 0f,       // K-turn: fraction of turning time with one tread near-stalled
     val crossTrackRmsM: Float = 0f,  // cruise/hold: RMS perpendicular distance from the line
     val crossTrackMaxM: Float = 0f,
     val timeSec: Float = 0f,
@@ -29,7 +29,7 @@ object Scoring {
     private const val PLACE = 0.05f   // 5 cm
     private const val CROSS = 0.04f   // 4 cm RMS
     private const val CROSS_MAX = 0.12f
-    private const val SCRUB_THRESH = 0.15f // tread fraction below this = scrubbing
+    private const val SCRUB_RATIO = 0.1f   // tread considered dragging below this fraction of the other
     private const val JERK = 0.04f         // mean |Δturn| per tick we consider "smooth"
 
     fun kturn(start: Pose, pitch: Float, dir: Int, truePath: List<Pose>,
@@ -41,16 +41,23 @@ object Scoring {
         val nx = -sin(start.heading); val ny = cos(start.heading)
         val tx = start.x + s * pitch * nx; val ty = start.y + s * pitch * ny
         val headingErr = abs(angleDelta(end.heading, targetHeading))
-        val placement = hypot(end.x - tx, end.y - ty)
+        // Lateral offset from the target row line (along-row position is free: the mower
+        // mows down the new row from wherever it ends, e.g. after the acquire phase).
+        val dx = cos(targetHeading); val dy = sin(targetHeading)
+        val placement = abs(dx * (end.y - ty) - dy * (end.x - tx))
         // forward overrun along the start heading
         val overrun = truePath.maxOfOrNull { (it.x - start.x) * cos(start.heading) + (it.y - start.y) * sin(start.heading) }?.coerceAtLeast(0f) ?: 0f
-        // min tread fraction while turning (both treads should keep rolling)
-        var minFrac = 1f
+        // Scrub time: fraction of meaningfully-turning steps where one tread is near-stalled
+        // while the other rolls (a globally slow arc is fine; a dragging tread is not).
+        var scrubSteps = 0; var turnSteps = 0
         for ((vl, vr) in treads) {
-            val turning = abs(vl - vr) > 0.05f
-            if (turning) minFrac = minOf(minFrac, minOf(abs(vl), abs(vr)) / maxTread)
+            val mx = max(abs(vl), abs(vr))
+            if (mx > 0.15f * maxTread && abs(vl - vr) > 0.04f) {
+                turnSteps++
+                if (kotlin.math.min(abs(vl), abs(vr)) < SCRUB_RATIO * mx) scrubSteps++
+            }
         }
-        val scrub = max(0f, SCRUB_THRESH - minFrac) / SCRUB_THRESH
+        val scrub = if (turnSteps > 0) scrubSteps.toFloat() / turnSteps else 0f
         val balanced = 1.0f * (headingErr / HEAD) +
             1.0f * (placement / PLACE) +
             0.7f * scrub +
@@ -59,7 +66,7 @@ object Scoring {
             0.4f * (jerk / JERK) +
             (if (completed) 0f else 10f)
         return Metrics(headingErrRad = headingErr, placementErrM = placement, overrunM = overrun,
-            minTreadFrac = minFrac, timeSec = timeSec, completed = completed, balanced = balanced)
+            scrubFrac = scrub, timeSec = timeSec, completed = completed, balanced = balanced)
     }
 
     /** Cruise / heading-hold: deviation from the line through start along start heading. */

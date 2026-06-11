@@ -9,9 +9,56 @@ fun main(args: Array<String>) {
     when (args.firstOrNull() ?: "assess") {
         "assess" -> assess()
         "tune" -> tune()
-        "all" -> { assess(); tune() }
-        else -> { println("usage: assess | tune | all"); return }
+        "ab" -> abKturn()
+        "all" -> { assess(); abKturn(); tune() }
+        else -> { println("usage: assess | tune | ab | all"); return }
     }
+}
+
+/**
+ * The K-turn planner A/B: legacy (iteration-3 behavior) vs the v2 planner (approach-rate
+ * profiling + fresh-pose settle + row acquisition), each under RAW telemetry and the
+ * heading-prediction pose source.
+ */
+private fun abKturn() {
+    val runner = Runner()
+    val scenarios = Scenarios.sweep()
+    val configs = listOf(
+        "legacy" to com.pradomo.control.maneuver.MultiPointTurn.Params(
+            turnScale = TURN_SCALE, linearScale = LINEAR_SCALE,
+            approachHorizon = 0f, settleFreshPose = false, acquireRow = false,
+        ),
+        "v2" to com.pradomo.control.maneuver.MultiPointTurn.Params(
+            turnScale = TURN_SCALE, linearScale = LINEAR_SCALE,
+        ),
+    )
+    println("=== K-TURN PLANNER A/B (${scenarios.size} scenarios) ===\n")
+    println("%-8s %-13s %8s %10s %10s %8s %7s %7s".format(
+        "planner", "pose", "score", "headErr°", "lateral", "scrub", "time", "%done"))
+    for ((name, prm) in configs) {
+        for (strat in listOf(PoseStrategy.RAW, PoseStrategy.HEADING_PRED)) {
+            val b = Behaviors.kturnWith(prm)
+            var score = 0.0; var head = 0.0; var lat = 0.0; var scrub = 0.0; var time = 0.0; var done = 0
+            for (s in scenarios) {
+                val m = runner.run(b, s, strat).metrics
+                score += m.balanced; head += Math.toDegrees(m.headingErrRad.toDouble())
+                lat += m.placementErrM * 100; scrub += m.scrubFrac; time += m.timeSec
+                if (m.completed) done++
+            }
+            val n = scenarios.size
+            println("%-8s %-13s %8.2f %9.1f° %8.1fcm %8.2f %6.1fs %6.0f%%".format(
+                name, strat, score / n, head / n, lat / n, scrub / n, time / n, 100.0 * done / n))
+        }
+        println()
+    }
+    // Plots for the worst-case-ish slope scenario, all four combos.
+    val rep = scenarios.firstOrNull { it.name.startsWith("slope0.1_dir1.2") } ?: scenarios.first()
+    OUT.mkdirs()
+    for ((name, prm) in configs) for (strat in listOf(PoseStrategy.RAW, PoseStrategy.HEADING_PRED)) {
+        val r = runner.run(Behaviors.kturnWith(prm), rep, strat)
+        Plot.write(r, File(OUT, "plots/ab_kturn_${name}_${strat}.svg"))
+    }
+    println("wrote A/B plots to ${File(OUT, "plots").path}")
 }
 
 private fun assess() {
@@ -20,19 +67,19 @@ private fun assess() {
     val behaviors = Behaviors.build(TuneParams())
     println("=== ASSESS: ${behaviors.size} behaviors × ${STRATEGIES.size} pose sources × ${scenarios.size} scenarios ===\n")
 
-    val csv = StringBuilder("behavior,strategy,scenario,score,headingDeg,placementCm,minTread,crossRmsCm,crossMaxCm,timeSec,completed\n")
-    println("%-13s %-12s %8s %10s %10s %9s %9s".format("behavior", "pose", "score", "headErr°", "place/cross", "minTread", "%done"))
+    val csv = StringBuilder("behavior,strategy,scenario,score,headingDeg,placementCm,scrubFrac,crossRmsCm,crossMaxCm,timeSec,completed\n")
+    println("%-13s %-12s %8s %10s %10s %9s %9s".format("behavior", "pose", "score", "headErr°", "place/cross", "scrub", "%done"))
     for (b in behaviors) {
         for (strat in STRATEGIES) {
             var score = 0.0; var head = 0.0; var place = 0.0; var tread = 0.0; var crossR = 0.0; var done = 0
             for (s in scenarios) {
                 val r = runner.run(b, s, strat); val m = r.metrics
                 score += m.balanced; head += Math.toDegrees(m.headingErrRad.toDouble())
-                place += m.placementErrM * 100; tread += m.minTreadFrac; crossR += m.crossTrackRmsM * 100
+                place += m.placementErrM * 100; tread += m.scrubFrac; crossR += m.crossTrackRmsM * 100
                 if (m.completed) done++
                 csv.append("%s,%s,%s,%.3f,%.2f,%.1f,%.3f,%.1f,%.1f,%.2f,%b\n".format(
                     b.name, strat, s.name, m.balanced, Math.toDegrees(m.headingErrRad.toDouble()),
-                    m.placementErrM * 100, m.minTreadFrac, m.crossTrackRmsM * 100, m.crossTrackMaxM * 100,
+                    m.placementErrM * 100, m.scrubFrac, m.crossTrackRmsM * 100, m.crossTrackMaxM * 100,
                     m.timeSec, m.completed))
             }
             val n = scenarios.size

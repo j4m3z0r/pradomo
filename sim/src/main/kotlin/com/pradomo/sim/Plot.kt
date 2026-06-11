@@ -50,8 +50,8 @@ object Plot {
         val label = buildString {
             append("${result.behavior} · ${result.strategy} · ${result.scenario}\n")
             if (m.headingErrRad != 0f || result.behavior == "kturn")
-                append("headErr=%.1f°  place=%.0fcm  minTread=%.2f  t=%.1fs%s".format(
-                    Math.toDegrees(m.headingErrRad.toDouble()), m.placementErrM * 100, m.minTreadFrac, m.timeSec,
+                append("headErr=%.1f°  place=%.0fcm  scrub=%.2f  t=%.1fs%s".format(
+                    Math.toDegrees(m.headingErrRad.toDouble()), m.placementErrM * 100, m.scrubFrac, m.timeSec,
                     if (!m.completed) "  INCOMPLETE" else ""))
             else
                 append("crossRMS=%.0fcm  max=%.0fcm  headErr=%.1f°".format(

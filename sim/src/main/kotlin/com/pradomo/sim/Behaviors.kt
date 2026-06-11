@@ -13,9 +13,11 @@ import com.pradomo.control.maneuver.TurnDirection
 data class TuneParams(
     // MultiPointTurn
     val turnRadius: Float = 0.45f,
-    val kTrim: Float = 2.0f,
+    val kTrim: Float = 1.5f,
     val settleTicks: Int = 3,
-    val minTrimTurn: Float = 0.15f,
+    val minTrimTurn: Float = 0.2f,
+    val approachHorizon: Float = 0.35f,
+    val kAcquireCross: Float = 4.0f,
     // CruiseManeuver.Gains
     val cKCross: Float = 4.0f,
     val cLeanCap: Float = 0.8f,
@@ -31,17 +33,20 @@ object Behaviors {
 
     fun build(p: TuneParams): List<Behavior> = listOf(kturn(p), cruise(p), headingHold(p))
 
-    fun kturn(p: TuneParams) = Behavior(
-        "kturn", BehaviorKind.KTURN, start = Pose(2f, 1f, 0.7f), maxTimeSec = 30f, pitch = PITCH, dir = 1,
+    fun kturn(p: TuneParams) = kturnWith(
+        MultiPointTurn.Params(
+            turnScale = TURN_SCALE, linearScale = LINEAR_SCALE,
+            turnRadius = p.turnRadius, kTrim = p.kTrim, settleTicks = p.settleTicks,
+            minTrimTurn = p.minTrimTurn, approachHorizon = p.approachHorizon,
+            kAcquireCross = p.kAcquireCross,
+        ),
+    )
+
+    /** K-turn behavior with explicit planner params (used by the legacy/improved A/B). */
+    fun kturnWith(prm: MultiPointTurn.Params) = Behavior(
+        "kturn", BehaviorKind.KTURN, start = Pose(2f, 1f, 0.7f), maxTimeSec = 45f, pitch = PITCH, dir = 1,
     ) {
-        val m = MultiPointTurn(
-            TurnDirection.LEFT, PITCH,
-            MultiPointTurn.Params(
-                turnScale = TURN_SCALE, linearScale = LINEAR_SCALE,
-                turnRadius = p.turnRadius, kTrim = p.kTrim, settleTicks = p.settleTicks,
-                minTrimTurn = p.minTrimTurn,
-            ),
-        )
+        val m = MultiPointTurn(TurnDirection.LEFT, PITCH, prm)
         Controller { pose, dt -> m.step(pose, dt) }
     }
 

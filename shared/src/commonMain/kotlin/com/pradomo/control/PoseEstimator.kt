@@ -84,19 +84,26 @@ class PoseEstimator(
     }
 
     private fun calibrate(sample: Pose, sampleT: Float) {
-        // 1) multiplicative effectiveness from motion magnitudes the commands predicted.
+        // 1) multiplicative effectiveness from the NET (signed) motion the commands
+        // predicted over the interval. Signed sums matter: commands that alternate sign
+        // within one telemetry interval (e.g. trim arcs) cancel in reality, and comparing
+        // net-to-net keeps the ratio identifiable — unsigned sums would drive k toward 0.
         var nomLin = 0f; var nomAng = 0f; var prevT = lastSampleT
         for (i in cmdT.indices) {
             val t = cmdT[i]; if (t < lastSampleT || t > sampleT) continue
             val seg = (t - prevT).coerceAtLeast(0f)
-            nomLin += kotlin.math.abs(cmdD[i]) * linearScale * seg
-            nomAng += kotlin.math.abs(cmdW[i]) * turnScale * seg
+            nomLin += cmdD[i] * linearScale * seg
+            nomAng += cmdW[i] * turnScale * seg
             prevT = t
         }
         val obsLin = hypot(sample.x - lastSampleX, sample.y - lastSampleY)
-        val obsAng = kotlin.math.abs(angleDelta(lastSampleHeading, sample.heading))
-        if (nomLin > params.minLinObs) kLin = ema(kLin, obsLin / nomLin, params.effAlpha).coerceIn(params.effMin, params.effMax)
-        if (nomAng > params.minAngObs) kAng = ema(kAng, obsAng / nomAng, params.effAlpha).coerceIn(params.effMin, params.effMax)
+        val obsAng = angleDelta(lastSampleHeading, sample.heading)
+        if (kotlin.math.abs(nomLin) > params.minLinObs) {
+            kLin = ema(kLin, obsLin / kotlin.math.abs(nomLin), params.effAlpha).coerceIn(params.effMin, params.effMax)
+        }
+        if (kotlin.math.abs(nomAng) > params.minAngObs) {
+            kAng = ema(kAng, obsAng / nomAng, params.effAlpha).coerceIn(params.effMin, params.effMax)
+        }
 
         // 2) additive drift: the residual between the observed sample and what the commands
         // (with current k) predict — i.e. the motion the commands DON'T explain (slope etc.).
