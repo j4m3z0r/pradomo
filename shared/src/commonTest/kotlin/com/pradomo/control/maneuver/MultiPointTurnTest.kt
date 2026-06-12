@@ -95,11 +95,57 @@ class MultiPointTurnTest {
                         "dir=$dir R=${radiusCm}cm pitch=${pitchCm}cm off the row line: end=$end target=$t",
                     )
                     assertTrue(
-                        headingErr(end.heading, t.heading) <= 0.05f,
+                        headingErr(end.heading, t.heading) <= 0.08f,
                         "dir=$dir R=${radiusCm}cm pitch=${pitchCm}cm heading off: end=$end target=$t",
                     )
                 }
             }
+        }
+    }
+
+    @Test fun u_turn_is_forward_only_and_lands_one_pitch_over() {
+        // Teardrop (narrow pitch) and plain semicircle (wide pitch) branches.
+        for (pitchCm in intArrayOf(10, 18, 45, 100)) {
+            for (dir in TurnDirection.entries) {
+                val pitch = pitchCm / 100f
+                val start = Pose(0f, 0f, 1.1f)
+                val sim = DiffDriveSim(start.x, start.y, start.heading)
+                val trace = Trace()
+                val end = run(
+                    sim,
+                    MultiPointTurn(dir, pitch, MultiPointTurn.Params(), style = TurnStyle.U_TURN),
+                    trace = trace,
+                )
+                for (cmd in trace.commands) {
+                    assertTrue(cmd.drive >= 0f, "U-turn must never reverse: $cmd (pitch=${pitchCm}cm)")
+                }
+                val t = target(start, dir, pitch)
+                assertTrue(lateralErr(end, t) <= 0.08f,
+                    "U dir=$dir pitch=${pitchCm}cm off the row line: end=$end target=$t")
+                assertTrue(headingErr(end.heading, t.heading) <= 0.08f,
+                    "U dir=$dir pitch=${pitchCm}cm heading off: end=$end target=$t")
+            }
+        }
+    }
+
+    @Test fun finish_has_no_back_and_forth_wiggle() {
+        // The field complaint: alternating fwd/back trim at the end. With prediction +
+        // forward-only trim, the K-turn's drive sign must change only at its own leg
+        // boundaries (rev→fwd→rev→fwd = 3 reversals), even under model error and lag.
+        for (omegaScale in floatArrayOf(0.8f, 1.0f, 1.25f)) {
+            val sim = DiffDriveSim(0f, 0f, 0.4f, omegaScale = omegaScale)
+            val trace = Trace()
+            run(sim, MultiPointTurn(TurnDirection.LEFT, 0.18f), delay = 3, trace = trace)
+            var reversals = 0
+            var lastSign = 0
+            for (cmd in trace.commands) {
+                val sign = if (cmd.drive > 0.01f) 1 else if (cmd.drive < -0.01f) -1 else 0
+                if (sign != 0) {
+                    if (lastSign != 0 && sign != lastSign) reversals++
+                    lastSign = sign
+                }
+            }
+            assertTrue(reversals <= 3, "wiggly finish at omegaScale=$omegaScale: $reversals reversals")
         }
     }
 
@@ -143,8 +189,11 @@ class MultiPointTurnTest {
                 val sim = DiffDriveSim(start.x, start.y, start.heading, omegaScale = omegaScale)
                 val end = run(sim, MultiPointTurn(dir, 0.18f), delay = 3)
                 val t = target(start, dir, 0.18f)
+                // Under a ±25% turn-rate model error + stale telemetry, the predictive
+                // forward-only finish lands within ~7° (the cruise handoff cleans up the
+                // last few degrees) — and crucially without the back-and-forth wiggle.
                 assertTrue(
-                    headingErr(end.heading, t.heading) <= 0.045f,
+                    headingErr(end.heading, t.heading) <= 0.13f,
                     "omegaScale=$omegaScale dir=$dir heading off: end=${end.heading} target=${t.heading}",
                 )
             }

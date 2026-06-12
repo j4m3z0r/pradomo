@@ -47,11 +47,11 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.pradomo.control.ButtonAction
 import com.pradomo.control.ConnectionState
 import com.pradomo.control.ControllerModeGroup
 import com.pradomo.control.SmoothLevel
 import com.pradomo.control.SpeedMode
+import com.pradomo.control.maneuver.TurnStyle
 import com.pradomo.input.UsbGamepadSource
 import com.pradomo.ui.map.MapView
 import com.pradomo.protocol.BladeSpeed
@@ -82,8 +82,6 @@ fun DriveScreen(
     val deck by vm.deck.collectAsStateWithLifecycle()
     val speedMode by vm.speedMode.collectAsStateWithLifecycle()
     val gamepad by UsbGamepadSource.deviceName.collectAsStateWithLifecycle()
-    val topButton by vm.topButton.collectAsStateWithLifecycle()
-    val bottomButton by vm.bottomButton.collectAsStateWithLifecycle()
     val smoothEnabled by vm.smoothEnabled.collectAsStateWithLifecycle()
     val smoothLevel by vm.smoothLevel.collectAsStateWithLifecycle()
     val trail by vm.trail.collectAsStateWithLifecycle()
@@ -92,9 +90,9 @@ fun DriveScreen(
     val maneuverLabel by vm.maneuverLabel.collectAsStateWithLifecycle()
     val cuttingWidthMm by vm.cuttingWidthMm.collectAsStateWithLifecycle()
     val rowOverlapMm by vm.rowOverlapMm.collectAsStateWithLifecycle()
-    val cruiseCorrection by vm.cruiseCorrection.collectAsStateWithLifecycle()
     val turnRadiusMm by vm.turnRadiusMm.collectAsStateWithLifecycle()
-    val headingAssist by vm.headingAssist.collectAsStateWithLifecycle()
+    val turnStyle by vm.turnStyle.collectAsStateWithLifecycle()
+    val resumeCruise by vm.resumeCruise.collectAsStateWithLifecycle()
 
     var pocketMode by remember { mutableStateOf(false) }
     var tab by remember { mutableStateOf(Tab.DRIVE) }
@@ -183,16 +181,15 @@ fun DriveScreen(
                 )
                 Tab.MAP -> MapView(pad, trail, state.telemetry, onClear = vm::clearMap)
                 Tab.SETTINGS -> SettingsTab(
-                    pad, gamepad, topButton, bottomButton, smoothEnabled, smoothLevel,
-                    cuttingWidthMm, rowOverlapMm, cruiseCorrection, turnRadiusMm, headingAssist,
-                    onTop = vm::setTopButton, onBottom = vm::setBottomButton,
+                    pad, gamepad, smoothEnabled, smoothLevel,
+                    cuttingWidthMm, rowOverlapMm, turnRadiusMm, turnStyle, resumeCruise,
                     onSmooth = vm::setSmoothEnabled,
                     onSmoothLevel = vm::setSmoothLevel,
                     onCuttingWidth = vm::setCuttingWidthMm,
                     onRowOverlap = vm::setRowOverlapMm,
-                    onCruiseCorrection = vm::setCruiseCorrection,
                     onTurnRadius = vm::setTurnRadiusMm,
-                    onHeadingAssist = vm::setHeadingAssist,
+                    onTurnStyle = vm::setTurnStyle,
+                    onResumeCruise = vm::setResumeCruise,
                 )
             }
         }
@@ -380,7 +377,10 @@ private fun ModePager(
         ) {
             when (group) {
                 ControllerModeGroup.SPEED -> SpeedSegmented(speedMode, connected, onMode)
-                ControllerModeGroup.AUTO -> AutoLegend()
+                ControllerModeGroup.AUTO -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    SpeedSegmented(speedMode, connected, onMode) // speed is adjustable in Auto too
+                    AutoLegend()
+                }
             }
         }
     }
@@ -527,24 +527,20 @@ private fun SpeedSegmented(mode: SpeedMode, enabled: Boolean, onMode: (SpeedMode
 private fun SettingsTab(
     pad: PaddingValues,
     gamepadName: String?,
-    topButton: ButtonAction,
-    bottomButton: ButtonAction,
     smoothEnabled: Boolean,
     smoothLevel: SmoothLevel,
     cuttingWidthMm: Int,
     rowOverlapMm: Int,
-    cruiseCorrection: Boolean,
     turnRadiusMm: Int,
-    headingAssist: Boolean,
-    onTop: (ButtonAction) -> Unit,
-    onBottom: (ButtonAction) -> Unit,
+    turnStyle: TurnStyle,
+    resumeCruise: Boolean,
     onSmooth: (Boolean) -> Unit,
     onSmoothLevel: (SmoothLevel) -> Unit,
     onCuttingWidth: (Int) -> Unit,
     onRowOverlap: (Int) -> Unit,
-    onCruiseCorrection: (Boolean) -> Unit,
     onTurnRadius: (Int) -> Unit,
-    onHeadingAssist: (Boolean) -> Unit,
+    onTurnStyle: (TurnStyle) -> Unit,
+    onResumeCruise: (Boolean) -> Unit,
 ) {
     Column(
         Modifier.fillMaxSize().padding(pad).padding(horizontal = 16.dp)
@@ -553,19 +549,19 @@ private fun SettingsTab(
     ) {
         SectionHeader("CONTROLLER BUTTONS")
         Card(colors = CardDefaults.cardColors(containerColor = PradomoColors.surface1)) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
                     gamepadName?.let { "🎮 $it connected" } ?: "No controller connected — plug in via USB-C",
                     color = if (gamepadName != null) PradomoColors.connected else PradomoColors.textSecondary,
                     style = MaterialTheme.typography.bodyMedium,
                 )
-                Text("Top button (small)", color = PradomoColors.textPrimary,
-                    style = MaterialTheme.typography.labelLarge)
-                ButtonActionSelector(topButton, onTop)
-                Text("Bottom button (large)", color = PradomoColors.textPrimary,
-                    style = MaterialTheme.typography.labelLarge)
-                ButtonActionSelector(bottomButton, onBottom)
-                Text("In Speed mode, hold a button to momentarily change speed. Hold both buttons and push the stick ◀▶ to switch to Auto mode.",
+                Text("• Tap top button: speed up a step · tap bottom: down a step (applies on release)",
+                    color = PradomoColors.textPrimary, style = MaterialTheme.typography.bodySmall)
+                Text("• Hold both buttons + push the stick ◀▶: switch Speed / Auto mode",
+                    color = PradomoColors.textPrimary, style = MaterialTheme.typography.bodySmall)
+                Text("• In Auto: hold the bottom (big) button + push the stick — ◀▶ K-turn, ▲▼ cruise",
+                    color = PradomoColors.textPrimary, style = MaterialTheme.typography.bodySmall)
+                Text("Button taps used as part of a combo never change the speed.",
                     color = PradomoColors.textSecondary, style = MaterialTheme.typography.labelSmall)
             }
         }
@@ -574,8 +570,32 @@ private fun SettingsTab(
         Card(colors = CardDefaults.cardColors(containerColor = PradomoColors.surface1)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 val pitch = (cuttingWidthMm - rowOverlapMm).coerceAtLeast(20)
-                Text("In Auto mode: gamepad — hold the big button and push the stick ◀▶ (K-turn) or ▲▼ (cruise). Touch — single-tap the joystick's edge.",
+                Text("In Auto mode: gamepad — hold the big button and push the stick ◀▶ (turn) or ▲▼ (cruise). Touch — single-tap the joystick's edge.",
                     color = PradomoColors.textSecondary, style = MaterialTheme.typography.labelSmall)
+
+                Text("Turn style", color = PradomoColors.textPrimary, fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.labelLarge)
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    TurnStyle.entries.forEachIndexed { i, st ->
+                        SegmentedButton(
+                            selected = turnStyle == st,
+                            onClick = { onTurnStyle(st) },
+                            shape = SegmentedButtonDefaults.itemShape(i, TurnStyle.entries.size),
+                            colors = SegmentedButtonDefaults.colors(
+                                activeContainerColor = PradomoColors.mossDeep,
+                                activeContentColor = PradomoColors.textPrimary,
+                            ),
+                            icon = {},
+                        ) { Text(if (st == TurnStyle.K_TURN) "K-turn" else "U-turn", maxLines = 1) }
+                    }
+                }
+                Text(
+                    if (turnStyle == TurnStyle.K_TURN)
+                        "K-turn: backs up into the mowed row, so it needs no space past the row end — but it reverses."
+                    else
+                        "U-turn: forward-only and faster, but sweeps past the row end and wide of the new row — needs clear headland.",
+                    color = PradomoColors.textSecondary, style = MaterialTheme.typography.labelSmall)
+
                 StepperRow("Cutting width", "$cuttingWidthMm mm",
                     onMinus = { onCuttingWidth((cuttingWidthMm - 10).coerceIn(100, 600)) },
                     onPlus = { onCuttingWidth((cuttingWidthMm + 10).coerceIn(100, 600)) })
@@ -588,26 +608,15 @@ private fun SettingsTab(
                 Text("Row spacing (pitch): $pitch mm",
                     color = PradomoColors.textPrimary, style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.Bold)
-                Text("Wider turn radius is gentler on grass but backs up deeper into the mowed row.",
+                Text("Wider turn radius is gentler on grass but uses more space.",
                     color = PradomoColors.textSecondary, style = MaterialTheme.typography.labelSmall)
-                Text("⚠ Set cutting width to your mower's real value — it sets how far each K-turn shifts over. A maneuver stops only on stick touch, E-STOP, or link loss; validate on your mower first.",
+                AssistSwitchRow(
+                    title = "Resume cruise after turn",
+                    body = "When an about-face finishes, set off down the new row in cruise (touch the stick to cancel). Your mowing loop becomes: cruise → tap turn → cruise.",
+                    checked = resumeCruise, onChange = onResumeCruise,
+                )
+                Text("⚠ Set cutting width to your mower's real value — it sets how far each turn shifts over. A maneuver stops only on stick touch, E-STOP, or link loss; validate on your mower first.",
                     color = PradomoColors.warning, style = MaterialTheme.typography.labelSmall)
-            }
-        }
-
-        SectionHeader("STEERING ASSIST")
-        Card(colors = CardDefaults.cardColors(containerColor = PradomoColors.surface1)) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                AssistSwitchRow(
-                    title = "Auto-correct cruise heading",
-                    body = "Hold a straight line in cruise using telemetry — the mower can't track straight on its own. You can always steer with the stick; this adds an automatic hold on top.",
-                    checked = cruiseCorrection, onChange = onCruiseCorrection,
-                )
-                AssistSwitchRow(
-                    title = "Heading hold (manual driving)",
-                    body = "Experimental: while you drive with the stick straight, keep pointing the same way (counters slopes and tread slip). Steering releases it instantly.",
-                    checked = headingAssist, onChange = onHeadingAssist,
-                )
             }
         }
 
@@ -682,24 +691,6 @@ private fun StepperRow(label: String, value: String, onMinus: () -> Unit, onPlus
             modifier = Modifier.width(84.dp))
         FilledTonalButton(onClick = onPlus, modifier = Modifier.size(42.dp),
             contentPadding = PaddingValues(0.dp)) { Text("+", fontSize = 20.sp) }
-    }
-}
-
-@Composable
-private fun ButtonActionSelector(selected: ButtonAction, onSelect: (ButtonAction) -> Unit) {
-    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-        ButtonAction.entries.forEachIndexed { i, a ->
-            SegmentedButton(
-                selected = selected == a,
-                onClick = { onSelect(a) },
-                shape = SegmentedButtonDefaults.itemShape(i, ButtonAction.entries.size),
-                colors = SegmentedButtonDefaults.colors(
-                    activeContainerColor = PradomoColors.mossDeep,
-                    activeContentColor = PradomoColors.textPrimary,
-                ),
-                icon = {},
-            ) { Text(a.short, maxLines = 1) }
-        }
     }
 }
 

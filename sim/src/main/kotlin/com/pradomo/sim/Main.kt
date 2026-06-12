@@ -1,5 +1,6 @@
 package com.pradomo.sim
 
+import com.pradomo.control.maneuver.TurnStyle
 import java.io.File
 
 private val OUT = File("sim/out")
@@ -16,49 +17,44 @@ fun main(args: Array<String>) {
 }
 
 /**
- * The K-turn planner A/B: legacy (iteration-3 behavior) vs the v2 planner (approach-rate
- * profiling + fresh-pose settle + row acquisition), each under RAW telemetry and the
- * heading-prediction pose source.
+ * K-turn FINISH-strategy A/B (the field complaint: end-of-turn back-and-forth wiggle).
+ * Compares the old alternating-trim finish vs the predictive forward-only finish, plus
+ * a U-turn, all under RAW telemetry (what ships). The wiggle column is drive reversals
+ * beyond the planned count.
  */
 private fun abKturn() {
     val runner = Runner()
     val scenarios = Scenarios.sweep()
+    val base = { com.pradomo.control.maneuver.MultiPointTurn.Params(turnScale = TURN_SCALE, linearScale = LINEAR_SCALE) }
     val configs = listOf(
-        "legacy" to com.pradomo.control.maneuver.MultiPointTurn.Params(
-            turnScale = TURN_SCALE, linearScale = LINEAR_SCALE,
-            approachHorizon = 0f, settleFreshPose = false, acquireRow = false,
-        ),
-        "v2" to com.pradomo.control.maneuver.MultiPointTurn.Params(
-            turnScale = TURN_SCALE, linearScale = LINEAR_SCALE,
-        ),
+        // (label, style, params)
+        Triple("legacy-wiggle", TurnStyle.K_TURN, base().copy(usePrediction = false, alternatingTrim = true)),
+        Triple("predict-fwd", TurnStyle.K_TURN, base()),
+        Triple("u-turn", TurnStyle.U_TURN, base()),
     )
-    println("=== K-TURN PLANNER A/B (${scenarios.size} scenarios) ===\n")
-    println("%-8s %-13s %8s %10s %10s %8s %7s %7s".format(
-        "planner", "pose", "score", "headErr°", "lateral", "scrub", "time", "%done"))
-    for ((name, prm) in configs) {
-        for (strat in listOf(PoseStrategy.RAW, PoseStrategy.HEADING_PRED)) {
-            val b = Behaviors.kturnWith(prm)
-            var score = 0.0; var head = 0.0; var lat = 0.0; var scrub = 0.0; var time = 0.0; var done = 0
-            for (s in scenarios) {
-                val m = runner.run(b, s, strat).metrics
-                score += m.balanced; head += Math.toDegrees(m.headingErrRad.toDouble())
-                lat += m.placementErrM * 100; scrub += m.scrubFrac; time += m.timeSec
-                if (m.completed) done++
-            }
-            val n = scenarios.size
-            println("%-8s %-13s %8.2f %9.1f° %8.1fcm %8.2f %6.1fs %6.0f%%".format(
-                name, strat, score / n, head / n, lat / n, scrub / n, time / n, 100.0 * done / n))
+    println("=== K-TURN FINISH A/B (${scenarios.size} scenarios, RAW telemetry) ===\n")
+    println("%-14s %8s %10s %10s %8s %8s %7s %7s".format(
+        "finish", "score", "headErr°", "lateral", "scrub", "wiggle", "time", "%done"))
+    for ((name, style, prm) in configs) {
+        val b = Behaviors.kturnWith(prm, style)
+        var score = 0.0; var head = 0.0; var lat = 0.0; var scrub = 0.0; var wig = 0.0; var time = 0.0; var done = 0
+        for (s in scenarios) {
+            val m = runner.run(b, s, PoseStrategy.RAW).metrics
+            score += m.balanced; head += Math.toDegrees(m.headingErrRad.toDouble())
+            lat += m.placementErrM * 100; scrub += m.scrubFrac; wig += m.wiggleReversals; time += m.timeSec
+            if (m.completed) done++
         }
-        println()
+        val n = scenarios.size
+        println("%-14s %8.2f %9.1f° %8.1fcm %8.2f %8.2f %6.1fs %6.0f%%".format(
+            name, score / n, head / n, lat / n, scrub / n, wig / n, time / n, 100.0 * done / n))
     }
-    // Plots for the worst-case-ish slope scenario, all four combos.
     val rep = scenarios.firstOrNull { it.name.startsWith("slope0.1_dir1.2") } ?: scenarios.first()
     OUT.mkdirs()
-    for ((name, prm) in configs) for (strat in listOf(PoseStrategy.RAW, PoseStrategy.HEADING_PRED)) {
-        val r = runner.run(Behaviors.kturnWith(prm), rep, strat)
-        Plot.write(r, File(OUT, "plots/ab_kturn_${name}_${strat}.svg"))
+    for ((name, style, prm) in configs) {
+        val r = runner.run(Behaviors.kturnWith(prm, style), rep, PoseStrategy.RAW)
+        Plot.write(r, File(OUT, "plots/ab_finish_${name}.svg"))
     }
-    println("wrote A/B plots to ${File(OUT, "plots").path}")
+    println("\nwrote A/B plots to ${File(OUT, "plots").path}")
 }
 
 private fun assess() {
@@ -113,9 +109,7 @@ private fun tune() {
 
     fun report(tag: String, p: TuneParams) {
         val k = Tuner.aggregate(Behaviors.kturn(p), scenarios, strat, runner)
-        val c = Tuner.aggregate(Behaviors.cruise(p), scenarios, strat, runner)
-        val h = Tuner.aggregate(Behaviors.headingHold(p), scenarios, strat, runner)
-        println("%-8s  kturn=%.2f  cruise=%.2f  hold=%.2f  (total %.2f)".format(tag, k, c, h, k + c + h))
+        println("%-8s  kturn=%.2f".format(tag, k))
     }
     report("before", base)
     val res = Tuner.tune(base, scenarios, strat, runner)

@@ -63,6 +63,21 @@ class MowerController(
 
     suspend fun stop() = drive(0f, 0f)
 
+    /**
+     * Persistent emergency stop. A single stop frame is NOT enough: BLE writes are
+     * silently dropped when the GATT is busy, the mower LATCHES its last command, and it
+     * has no dead-man watchdog — so a lost stop frame means it keeps driving. This sends
+     * a burst of stop frames with blade-off interleaved, each write individually
+     * fault-tolerant so one failure never aborts the rest of the burst.
+     */
+    suspend fun emergencyStop(cutHeight: Int) {
+        repeat(ESTOP_STOP_FRAMES) { i ->
+            runCatching { stop() }
+            if (i == 1 || i == 5) runCatching { setDeckBlade(0, cutHeight) }
+            delay(ESTOP_FRAME_SPACING_MS)
+        }
+    }
+
     /** Set cutting-deck height + blade speed (latched by the device; send once per change). */
     suspend fun setDeckBlade(bladeSpeed: Int, cutHeight: Int) {
         transport.write(LymowProtocol.toBle(LymowProtocol.encodeDeckBlade(bladeSpeed, cutHeight)))
@@ -100,6 +115,12 @@ class MowerController(
         keepaliveJob = null
         transport.close()
         _state.update { it.copy(connection = ConnectionState.Disconnected) }
+    }
+
+    companion object {
+        /** E-STOP burst shape: ~12 frames over ~0.7s rides out transient write drops. */
+        const val ESTOP_STOP_FRAMES = 12
+        const val ESTOP_FRAME_SPACING_MS = 60L
     }
 
     private fun onNotify(value: ByteArray) {

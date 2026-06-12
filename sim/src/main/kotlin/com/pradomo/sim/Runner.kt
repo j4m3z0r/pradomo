@@ -49,6 +49,7 @@ class Runner(private val linearScale: Float = LINEAR_SCALE, private val turnScal
         val estPath = ArrayList<Pose>()
         val treads = ArrayList<Pair<Float, Float>>()
         val turns = ArrayList<Float>()
+        val drives = ArrayList<Float>()
 
         var t = 0f
         var completed = false
@@ -64,13 +65,14 @@ class Runner(private val linearScale: Float = LINEAR_SCALE, private val turnScal
             t += CONTROL_DT
             sampler.tick(t, plant.pose())
             truePath.add(plant.pose()); estPath.add(src.pose()); treads.add(plant.lastVL to plant.lastVR)
-            turns.add(cmd.turn)
+            turns.add(cmd.turn); drives.add(cmd.drive)
         }
 
         val jerk = meanAbsDelta(turns)
+        val wiggle = driveReversals(drives)
         val metrics = when (behavior.kind) {
             BehaviorKind.KTURN -> Scoring.kturn(behavior.start, behavior.pitch, behavior.dir,
-                truePath, treads, plant.maxTreadSpeed(), t, completed, jerk)
+                truePath, treads, plant.maxTreadSpeed(), t, completed, jerk, wiggle)
             BehaviorKind.CRUISE, BehaviorKind.HEADING_HOLD -> Scoring.lineHold(behavior.start, truePath, t, jerk)
         }
         return RunResult(behavior.name, scenario.name, strategy, truePath, estPath, metrics)
@@ -81,5 +83,16 @@ class Runner(private val linearScale: Float = LINEAR_SCALE, private val turnScal
         var s = 0f
         for (i in 1 until xs.size) s += kotlin.math.abs(xs[i] - xs[i - 1])
         return s / (xs.size - 1)
+    }
+
+    /** Count drive-direction reversals — the "wiggle" the user complained about. A clean
+     * K-turn has exactly 3 (rev/fwd/rev/fwd); extra reversals = back-and-forth finishing. */
+    private fun driveReversals(drives: List<Float>): Int {
+        var reversals = 0; var last = 0
+        for (d in drives) {
+            val sign = if (d > 0.01f) 1 else if (d < -0.01f) -1 else 0
+            if (sign != 0) { if (last != 0 && sign != last) reversals++; last = sign }
+        }
+        return reversals
     }
 }

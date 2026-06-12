@@ -9,14 +9,17 @@ import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.content.Context
+import android.util.Log
 import com.pradomo.protocol.LymowProtocol
 import com.pradomo.transport.DiscoveredDevice
 import com.pradomo.transport.MowerScanner
 import com.pradomo.transport.MowerTransport
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -26,6 +29,8 @@ import kotlin.coroutines.resume
 private val SERVICE = UUID.fromString(LymowProtocol.SERVICE_UUID)
 private val CONTROL = UUID.fromString(LymowProtocol.CONTROL_CHAR_UUID)
 private val CCCD = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+private const val TAG = "PradomoBle"
+private const val WRITE_RETRY_DELAY_MS = 30L
 
 @SuppressLint("MissingPermission") // callers gate on BLUETOOTH_SCAN/CONNECT before use
 class AndroidMowerScanner(context: Context) : MowerScanner {
@@ -142,14 +147,26 @@ class AndroidMowerTransport(
     override suspend fun write(value: ByteArray) {
         val g = gatt ?: error("not connected")
         val ch = control ?: error("no control characteristic")
+        // writeCharacteristic fails (returns busy/false) if the previous write hasn't
+        // completed — common at our 80ms cadence. A silently dropped frame is dangerous
+        // (the mower latches its last command), so check the result and retry once.
+        if (!writeOnce(g, ch, value)) {
+            delay(WRITE_RETRY_DELAY_MS)
+            if (!writeOnce(g, ch, value)) {
+                Log.w(TAG, "BLE write dropped after retry (${value.size} bytes)")
+            }
+        }
+    }
+
+    private fun writeOnce(g: BluetoothGatt, ch: BluetoothGattCharacteristic, value: ByteArray): Boolean =
         if (android.os.Build.VERSION.SDK_INT >= 33) {
-            g.writeCharacteristic(ch, value, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
+            g.writeCharacteristic(ch, value, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) ==
+                BluetoothStatusCodes.SUCCESS
         } else {
             @Suppress("DEPRECATION")
             ch.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
             @Suppress("DEPRECATION") run { ch.value = value; g.writeCharacteristic(ch) }
         }
-    }
 
     override fun close() {
         closing = true

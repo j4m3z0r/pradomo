@@ -18,6 +18,7 @@ data class Metrics(
     val scrubFrac: Float = 0f,       // K-turn: fraction of turning time with one tread near-stalled
     val crossTrackRmsM: Float = 0f,  // cruise/hold: RMS perpendicular distance from the line
     val crossTrackMaxM: Float = 0f,
+    val wiggleReversals: Int = 0,    // K-turn: drive-direction reversals beyond the planned 3
     val timeSec: Float = 0f,
     val completed: Boolean = true,
     val balanced: Float = 0f,
@@ -34,7 +35,7 @@ object Scoring {
 
     fun kturn(start: Pose, pitch: Float, dir: Int, truePath: List<Pose>,
               treads: List<Pair<Float, Float>>, maxTread: Float, timeSec: Float, completed: Boolean,
-              jerk: Float): Metrics {
+              jerk: Float, driveReversals: Int): Metrics {
         val end = truePath.lastOrNull() ?: start
         val s = dir.toFloat()
         val targetHeading = start.heading + s * PI.toFloat()
@@ -58,15 +59,19 @@ object Scoring {
             }
         }
         val scrub = if (turnSteps > 0) scrubSteps.toFloat() / turnSteps else 0f
+        // Wiggle: drive reversals beyond the planned count for the style (3 for K-turn,
+        // 0 for a forward-only U-turn). Each extra reversal is a back-and-forth the user hates.
+        val wiggle = (driveReversals - 3).coerceAtLeast(0)
         val balanced = 1.0f * (headingErr / HEAD) +
             1.0f * (placement / PLACE) +
             0.7f * scrub +
             0.3f * (timeSec / 20f) +
             0.3f * (overrun / 0.5f) +
             0.4f * (jerk / JERK) +
+            0.6f * wiggle +
             (if (completed) 0f else 10f)
         return Metrics(headingErrRad = headingErr, placementErrM = placement, overrunM = overrun,
-            scrubFrac = scrub, timeSec = timeSec, completed = completed, balanced = balanced)
+            scrubFrac = scrub, wiggleReversals = wiggle, timeSec = timeSec, completed = completed, balanced = balanced)
     }
 
     /** Cruise / heading-hold: deviation from the line through start along start heading. */

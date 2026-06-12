@@ -48,3 +48,9 @@ dependencies {
     ksp(libs.androidx.room.compiler)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }
+
+// Safety gate: the shared unit tests (incl. the E-STOP burst regression test) run on
+// EVERY app build — assembleDebug fails if any of them fail.
+tasks.named("preBuild") {
+    dependsOn(":shared:jvmTest")
+}

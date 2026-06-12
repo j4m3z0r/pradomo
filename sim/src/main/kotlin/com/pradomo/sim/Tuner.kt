@@ -28,18 +28,6 @@ object Tuner {
             { p, v -> p.copy(approachHorizon = v) }, { it.approachHorizon }),
         Axis("kturn.kAcquireCross", { Behaviors.kturn(it) }, listOf(2f, 4f, 6f, 8f),
             { p, v -> p.copy(kAcquireCross = v) }, { it.kAcquireCross }),
-        Axis("cruise.kCross", { Behaviors.cruise(it) }, listOf(1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 4.0f, 5.0f),
-            { p, v -> p.copy(cKCross = v) }, { it.cKCross }),
-        Axis("cruise.leanCap", { Behaviors.cruise(it) }, listOf(0.4f, 0.6f, 0.8f, 1.0f),
-            { p, v -> p.copy(cLeanCap = v) }, { it.cLeanCap }),
-        Axis("cruise.kHead", { Behaviors.cruise(it) }, listOf(0.8f, 1.2f, 1.6f, 2.0f, 2.5f, 3.0f),
-            { p, v -> p.copy(cKHead = v) }, { it.cKHead }),
-        Axis("cruise.turnCap", { Behaviors.cruise(it) }, listOf(0.3f, 0.4f, 0.5f, 0.6f, 0.7f),
-            { p, v -> p.copy(cTurnCap = v) }, { it.cTurnCap }),
-        Axis("hold.kHead", { Behaviors.headingHold(it) }, listOf(0.8f, 1.2f, 1.6f, 2.0f, 2.5f, 3.0f, 3.5f),
-            { p, v -> p.copy(hKHead = v) }, { it.hKHead }),
-        Axis("hold.turnCap", { Behaviors.headingHold(it) }, listOf(0.3f, 0.4f, 0.5f, 0.6f, 0.7f),
-            { p, v -> p.copy(hTurnCap = v) }, { it.hTurnCap }),
     )
 
     fun aggregate(behavior: Behavior, scenarios: List<Scenario>, strategy: PoseStrategy, runner: Runner): Double {

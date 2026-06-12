@@ -17,6 +17,9 @@ private class FakeTransport : MowerTransport {
     val writes = mutableListOf<ByteArray>()
     var connected = false
     var notifying = false
+    /** Fail every Nth write (0 = reliable) — models GATT-busy drops on real BLE. */
+    var failEveryNthWrite = 0
+    private var writeAttempts = 0
     private var cb: ((ByteArray) -> Unit)? = null
     private var disconnectCb: (() -> Unit)? = null
     override suspend fun connect() { connected = true }
@@ -24,12 +27,18 @@ private class FakeTransport : MowerTransport {
     override fun close() { connected = false; closed = true }
     override suspend fun startNotify(onValue: (ByteArray) -> Unit) { notifying = true; cb = onValue }
     override suspend fun stopNotify() { notifying = false }
-    override suspend fun write(value: ByteArray) { writes.add(value) }
+    override suspend fun write(value: ByteArray) {
+        writeAttempts++
+        if (failEveryNthWrite > 0 && writeAttempts % failEveryNthWrite == 0) error("gatt busy")
+        writes.add(value)
+    }
     override fun onDisconnect(callback: () -> Unit) { disconnectCb = callback }
     fun feed(value: ByteArray) = cb?.invoke(value)
     fun loseConnection() { connected = false; disconnectCb?.invoke() }
     fun framesHex() = writes.map { LymowProtocol.fromBle(it).hex() }
 }
+
+private const val STOP_FRAME = "10313802520a0d000000001500000000"
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class MowerControllerTest {
@@ -98,6 +107,36 @@ class MowerControllerTest {
         t.loseConnection()
         assertEquals(ConnectionState.Disconnected, c.state.value.connection)
         assertTrue(t.closed)
+    }
+
+    // ---- E-STOP: these protect the safety-critical path; they run on every app build. --
+
+    @Test fun emergency_stop_sends_a_burst_of_stop_and_blade_off_frames() = runTest {
+        val t = FakeTransport()
+        val c = MowerController(t, clientId = "abc", scope = backgroundScope)
+        c.connect()
+        t.writes.clear()
+        c.emergencyStop(cutHeight = 96)
+        val frames = t.framesHex()
+        val stops = frames.count { it == STOP_FRAME }
+        val bladeOff = frames.count { it == LymowProtocol.encodeDeckBlade(0, 96).hex() }
+        assertTrue(stops >= 10, "expected a burst of stop frames, got $stops")
+        assertTrue(bladeOff >= 2, "expected repeated blade-off frames, got $bladeOff")
+    }
+
+    @Test fun emergency_stop_survives_a_flaky_transport() = runTest {
+        // Real BLE drops writes when the GATT is busy. Even with every 3rd write failing,
+        // the burst must keep going and still land plenty of stop frames + a blade-off.
+        val t = FakeTransport().apply { failEveryNthWrite = 3 }
+        val c = MowerController(t, clientId = "abc", scope = backgroundScope)
+        runCatching { c.connect() } // init frames may "fail" too — irrelevant here
+        t.writes.clear()
+        c.emergencyStop(cutHeight = 96) // must not throw
+        val frames = t.framesHex()
+        assertTrue(frames.count { it == STOP_FRAME } >= 7,
+            "burst should ride out dropped writes, got ${frames.count { it == STOP_FRAME }} stops")
+        assertTrue(frames.any { it == LymowProtocol.encodeDeckBlade(0, 96).hex() },
+            "at least one blade-off must get through")
     }
 
     @Test fun notification_updates_state() = runTest {
