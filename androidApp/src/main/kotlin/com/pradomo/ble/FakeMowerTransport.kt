@@ -10,11 +10,15 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
 
 /** Device id that routes the connection to the simulated mower instead of BLE. */
 const val DEMO_DEVICE_ID = "DEMO"
+
+/** Simulated heading drift while moving (rad/s) — see the sim loop comment. */
+private const val DRIFT_RAD_PER_S = 0.06f
 
 /**
  * A simulated mower for demo mode. Accepts joystick commands (integrates them into a
@@ -47,6 +51,10 @@ class FakeMowerTransport : MowerTransport {
                 delay(120)
                 val dt = 0.12f
                 heading += angular * dt
+                // Like real grass: the mower drifts while translating (slope/tread slip),
+                // so it does NOT track straight on constant commands. This makes cruise
+                // correction, heading hold, and the K-turn trim phase visible in demo.
+                if (abs(linear) > 0.01f) heading += DRIFT_RAD_PER_S * dt
                 x += linear * cos(heading) * dt
                 y += linear * sin(heading) * dt
                 ticks++

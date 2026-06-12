@@ -5,4 +5,4 @@ dependencyResolutionManagement {
     repositories { google(); mavenCentral() }
 }
 rootProject.name = "pradomo-rc-app"
-include(":shared", ":androidApp")
+include(":shared", ":androidApp", ":sim")

@@ -7,12 +7,20 @@ import androidx.lifecycle.viewModelScope
 import com.pradomo.ble.AndroidMowerTransport
 import com.pradomo.ble.DEMO_DEVICE_ID
 import com.pradomo.ble.FakeMowerTransport
-import com.pradomo.control.ButtonAction
+import com.pradomo.control.ConnectionState
+import com.pradomo.control.ControllerModeGroup
 import com.pradomo.control.MowerController
 import com.pradomo.control.MowerState
 import com.pradomo.control.SmoothLevel
 import com.pradomo.control.SpeedMode
 import com.pradomo.control.SpeedSmoother
+import com.pradomo.control.maneuver.CruiseManeuver
+import com.pradomo.control.maneuver.Maneuver
+import com.pradomo.control.maneuver.ManeuverCommand
+import com.pradomo.control.maneuver.MultiPointTurn
+import com.pradomo.control.maneuver.Pose
+import com.pradomo.control.maneuver.TurnDirection
+import com.pradomo.control.maneuver.TurnStyle
 import com.pradomo.data.MapRepository
 import com.pradomo.data.SettingsStore
 import com.pradomo.input.ButtonEvent
@@ -22,6 +30,7 @@ import com.pradomo.input.UsbGamepadSource
 import com.pradomo.map.MapSample
 import com.pradomo.protocol.BladeSpeed
 import com.pradomo.protocol.DeckHeights
+import kotlin.math.abs
 import kotlin.math.hypot
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -60,17 +69,43 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
     private var lastCmdLinear = 0f
     private var lastCmdAngular = 0f
 
-    // Base mode (from the on-screen chips) vs momentary overrides from held remote buttons.
-    private var baseSpeedMode = SpeedMode.NORMAL
     private val heldButtons = mutableSetOf<Int>()
+    // Press-episode tracking for the latched speed steps: a press only steps the speed on
+    // RELEASE, and only if the press wasn't used for anything else (the both-buttons mode
+    // chord, a maneuver trigger/cancel, or steering while held).
+    private val pressDirty = mutableMapOf<Int, Boolean>()
+
+    // Controller mode group (what the buttons do) + the both-buttons mode-select gesture.
+    private val _modeGroup = MutableStateFlow(ControllerModeGroup.SPEED)
+    val modeGroup: StateFlow<ControllerModeGroup> = _modeGroup.asStateFlow()
+    private val _modeSelecting = MutableStateFlow(false)
+    val modeSelecting: StateFlow<Boolean> = _modeSelecting.asStateFlow()
+    private var modeSelectArmed = true              // debounce: ready for the next L/R cycle
+    private var autoTriggerArmed = true             // a maneuver needs a fresh big-button press
+
+    // Semi-autonomous maneuver currently driving the mower (Auto group), if any.
+    private var activeManeuver: Maneuver? = null
+    private var maneuverArmed = false               // once true, a fresh stick touch cancels
+    private var activeIsTurn = false                // the active maneuver is an about-face
+    private val _maneuverLabel = MutableStateFlow<String?>(null)
+    val maneuverLabel: StateFlow<String?> = _maneuverLabel.asStateFlow()
+
+    // Mower geometry for placing auto-turns one row over (pitch = cutting width − overlap).
+    private val _cuttingWidthMm = MutableStateFlow(SettingsStore.DEFAULT_CUTTING_WIDTH_MM)
+    val cuttingWidthMm: StateFlow<Int> = _cuttingWidthMm.asStateFlow()
+    private val _rowOverlapMm = MutableStateFlow(SettingsStore.DEFAULT_ROW_OVERLAP_MM)
+    val rowOverlapMm: StateFlow<Int> = _rowOverlapMm.asStateFlow()
+    /** K-turn arc radius (mm); wider is gentler on the grass. */
+    private val _turnRadiusMm = MutableStateFlow(SettingsStore.DEFAULT_TURN_RADIUS_MM)
+    val turnRadiusMm: StateFlow<Int> = _turnRadiusMm.asStateFlow()
+    /** About-face style (K-turn backs up; U-turn is forward-only). */
+    private val _turnStyle = MutableStateFlow(TurnStyle.K_TURN)
+    val turnStyle: StateFlow<TurnStyle> = _turnStyle.asStateFlow()
+    /** After an about-face, set off down the new row in cruise. */
+    private val _resumeCruise = MutableStateFlow(false)
+    val resumeCruise: StateFlow<Boolean> = _resumeCruise.asStateFlow()
 
     private val settings = SettingsStore(app)
-
-    /** Persisted, user-configurable controller-button actions (held = momentary speed). */
-    private val _topButton = MutableStateFlow(ButtonAction.SLOW)
-    val topButton: StateFlow<ButtonAction> = _topButton.asStateFlow()
-    private val _bottomButton = MutableStateFlow(ButtonAction.TURBO)
-    val bottomButton: StateFlow<ButtonAction> = _bottomButton.asStateFlow()
 
     /** Controlled deceleration: ease the sent drive/turn toward the target. */
     private val _smoothEnabled = MutableStateFlow(false)
@@ -79,6 +114,8 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
     val smoothLevel: StateFlow<SmoothLevel> = _smoothLevel.asStateFlow()
     private val smoother = SpeedSmoother(SmoothLevel.MEDIUM.ratePerSec)
     private var lastSentNonzero = false
+    /** While > 0, the loop sends nothing: the E-STOP burst owns the BLE channel. */
+    private var estopTicks = 0
 
     private var driveLoop: Job? = null
 
@@ -86,11 +123,15 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
         // Load persisted preferences; deck height shows the last value instead of 50mm.
         viewModelScope.launch {
             _deck.value = _deck.value.copy(heightMm = settings.deckHeightMm.first())
-            _topButton.value = settings.topButton.first()
-            _bottomButton.value = settings.bottomButton.first()
             _smoothEnabled.value = settings.smoothEnabled.first()
             _smoothLevel.value = settings.smoothLevel.first()
             smoother.ratePerSec = _smoothLevel.value.ratePerSec
+            _cuttingWidthMm.value = settings.cuttingWidthMm.first()
+            _rowOverlapMm.value = settings.rowOverlapMm.first()
+            _modeGroup.value = settings.modeGroup.first()
+            _turnRadiusMm.value = settings.turnRadiusMm.first()
+            _turnStyle.value = settings.turnStyle.first()
+            _resumeCruise.value = settings.resumeCruiseAfterTurn.first()
         }
     }
 
@@ -108,7 +149,14 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
         mowerId = deviceId
         _trail.value = emptyList()
         viewModelScope.launch { runCatching { _trail.value = mapRepo.track(mowerId) } }
-        viewModelScope.launch { c.state.collect { _state.value = it; recordTrail(it) } }
+        viewModelScope.launch {
+            c.state.collect {
+                _state.value = it
+                recordTrail(it)
+                // Link dropped / out of range: abort any maneuver (we can no longer steer).
+                if (it.connection == ConnectionState.Disconnected) cancelManeuver()
+            }
+        }
         // Both input sources feed the same sink; last input wins.
         viewModelScope.launch { input.vector.collect { v -> onControl(v) } }
         viewModelScope.launch { UsbGamepadSource.vector.collect { v -> onControl(v) } }
@@ -122,24 +170,37 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
         driveLoop = viewModelScope.launch {
             val dt = RESEND_MS / 1000f
             while (isActive) {
-                val target = _control.value
-                // Effective drive/turn to send: smoothed toward target, or raw.
-                val (dr, tu) = if (_smoothEnabled.value) {
-                    smoother.step(target.drive, target.turn, dt)
-                } else {
-                    smoother.reset(target.drive, target.turn) // keep synced for seamless enable
-                    target.drive to target.turn
+                when {
+                    // E-STOP burst in flight: stay off the channel so its frames get through.
+                    estopTicks > 0 -> estopTicks--
+                    // Picking a mode group: hold still so the stick only cycles modes.
+                    _modeSelecting.value -> {
+                        if (lastSentNonzero) { runCatching { controller?.stop() }; lastSentNonzero = false }
+                        smoother.reset()
+                    }
+                    // A maneuver is driving: command comes from telemetry-closed-loop, not the stick.
+                    activeManeuver != null -> stepManeuver(dt)
+                    // Normal manual driving (smoothed toward the stick, or raw).
+                    else -> {
+                        val target = _control.value
+                        val (dr, tu) = if (_smoothEnabled.value) {
+                            smoother.step(target.drive, target.turn, dt)
+                        } else {
+                            smoother.reset(target.drive, target.turn) // keep synced for seamless enable
+                            target.drive to target.turn
+                        }
+                        if (dr != 0f || tu != 0f) {
+                            runCatching { controller?.drive(dr, tu) }
+                            lastSentNonzero = true
+                        } else if (lastSentNonzero) {
+                            runCatching { controller?.stop() } // reached zero
+                            lastSentNonzero = false
+                        }
+                        // Remember what we commanded, for the map's traction layer (Epic 3.3).
+                        lastCmdLinear = dr * _speedMode.value.maxLinear
+                        lastCmdAngular = tu * TURN_LIMIT
+                    }
                 }
-                if (dr != 0f || tu != 0f) {
-                    runCatching { controller?.drive(dr, tu) }
-                    lastSentNonzero = true
-                } else if (lastSentNonzero) {
-                    runCatching { controller?.stop() } // reached zero
-                    lastSentNonzero = false
-                }
-                // Remember what we commanded, for the map's traction layer (Epic 3.3).
-                lastCmdLinear = dr * _speedMode.value.maxLinear
-                lastCmdAngular = tu * TURN_LIMIT
                 delay(RESEND_MS)
             }
         }
@@ -173,6 +234,52 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun onControl(v: ControlVector) {
         _control.value = v
+        val mag = hypot(v.drive, v.turn)
+
+        // A stick push while a button is held means the press was a combined gesture
+        // (maneuver trigger / steering) — releasing it must not also step the speed.
+        if (mag >= STICK_DEADZONE && heldButtons.isNotEmpty()) {
+            heldButtons.forEach { pressDirty[it] = true }
+        }
+
+        // Both buttons held: the stick cycles the mode group instead of driving.
+        if (_modeSelecting.value) {
+            if (modeSelectArmed && abs(v.turn) >= MODE_CYCLE_THRESHOLD && abs(v.turn) > abs(v.drive)) {
+                _modeGroup.value = if (v.turn < 0f) _modeGroup.value.next() else _modeGroup.value.prev()
+                modeSelectArmed = false
+            } else if (mag < STICK_RECENTER) {
+                modeSelectArmed = true
+            }
+            return
+        }
+
+        // A maneuver is running. Arm once the stick returns near center after the trigger,
+        // then respond by maneuver type:
+        //  - Cruise: left/right steers (blended in the loop); forward/back past a threshold
+        //    disengages. Small fwd/back nudges while steering are ignored.
+        //  - K-turn (autonomous): any fresh deflection cancels — the user grabbing control.
+        if (activeManeuver != null) {
+            val cruise = activeManeuver is CruiseManeuver
+            if (!maneuverArmed) {
+                val centered = if (cruise) abs(v.drive) < STICK_RECENTER else mag < STICK_RECENTER
+                if (centered) maneuverArmed = true
+                return
+            }
+            if (cruise) {
+                if (abs(v.drive) >= CRUISE_DISENGAGE_DRIVE) {
+                    cancelManeuver() // fall through and treat this push as a normal command
+                } else {
+                    return // stay engaged; the loop blends the live lateral as steering
+                }
+            } else {
+                if (mag >= STICK_DEADZONE) cancelManeuver() else return
+            }
+        }
+
+        // Auto group: a deliberate push while the big button is held starts a maneuver.
+        maybeStartAuto()
+        if (activeManeuver != null) return
+
         // With controlled deceleration on, release coasts to a stop via the loop;
         // otherwise stop immediately.
         if (v.drive == 0f && v.turn == 0f && !_smoothEnabled.value) {
@@ -180,46 +287,188 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** On-screen speed selector: sets the base mode (held buttons still override). */
+    /** Speed selector (on-screen chips or latched button steps). */
     fun setSpeedMode(mode: SpeedMode) {
-        baseSpeedMode = mode
-        applyEffectiveSpeed()
+        _speedMode.value = mode
+        controller?.maxLinear = mode.maxLinear
     }
 
-    /** Momentary remote-button speed override (held). */
+    /** Step the speed one notch (latched; from a clean button release). Clamps at the ends. */
+    private fun speedStep(delta: Int) {
+        val entries = SpeedMode.entries
+        setSpeedMode(entries[(_speedMode.value.ordinal + delta).coerceIn(0, entries.size - 1)])
+    }
+
+    /** Swipe selector (touch parity with the gamepad both-buttons chord): set the group. */
+    fun setModeGroup(g: ControllerModeGroup) {
+        if (_modeGroup.value == g) return
+        cancelManeuver() // changing group drops any running maneuver
+        _modeGroup.value = g
+        persist { settings.setModeGroup(g) }
+    }
+
+    /**
+     * Controller buttons, in BOTH mode groups:
+     *  - clean press+release: top steps the speed up, bottom steps it down (latched);
+     *    the step fires on RELEASE so combined gestures can suppress it.
+     *  - hold both + stick ◀▶: switch mode group (chord; uses up both presses).
+     *  - Auto group: hold the bottom (big) button + push the stick: start a maneuver
+     *    (the deflection marks the press dirty — no speed change on release).
+     *  - any press while a maneuver runs: cancel it (also uses up the press).
+     */
     private fun onButton(e: ButtonEvent) {
-        if (e.pressed) heldButtons.add(e.buttonId) else heldButtons.remove(e.buttonId)
-        applyEffectiveSpeed()
-    }
-
-    private fun actionFor(keycode: Int): ButtonAction = when (keycode) {
-        SettingsStore.KEYCODE_TOP -> _topButton.value
-        SettingsStore.KEYCODE_BOTTOM -> _bottomButton.value
-        else -> ButtonAction.NONE
-    }
-
-    private fun applyEffectiveSpeed() {
-        val held = heldButtons.map { actionFor(it) }
-        val override = when {
-            held.any { it == ButtonAction.TURBO } -> SpeedMode.TURBO
-            held.any { it == ButtonAction.SLOW } -> SpeedMode.SLOW
-            else -> null
+        if (e.pressed) {
+            heldButtons.add(e.buttonId)
+            pressDirty[e.buttonId] = false
+            if (activeManeuver != null) {
+                cancelManeuver()
+                pressDirty[e.buttonId] = true
+            }
+            val bothHeld = SettingsStore.KEYCODE_TOP in heldButtons &&
+                SettingsStore.KEYCODE_BOTTOM in heldButtons
+            if (bothHeld) {
+                heldButtons.forEach { pressDirty[it] = true } // chord: both presses used up
+                if (!_modeSelecting.value) {
+                    _modeSelecting.value = true
+                    modeSelectArmed = true
+                }
+            }
+            // Pressing the big button while the stick is already deflected can start a maneuver.
+            maybeStartAuto()
+        } else {
+            heldButtons.remove(e.buttonId)
+            val dirty = pressDirty.remove(e.buttonId) ?: true
+            if (_modeSelecting.value && heldButtons.size < 2) {
+                _modeSelecting.value = false
+                persist { settings.setModeGroup(_modeGroup.value) }
+            }
+            // Re-arm the Auto trigger when the big button is released (one maneuver per press).
+            if (e.buttonId == SettingsStore.KEYCODE_BOTTOM) autoTriggerArmed = true
+            if (!dirty) {
+                when (e.buttonId) {
+                    SettingsStore.KEYCODE_TOP -> speedStep(+1)
+                    SettingsStore.KEYCODE_BOTTOM -> speedStep(-1)
+                }
+            }
         }
-        val effective = override ?: baseSpeedMode
-        _speedMode.value = effective
-        controller?.maxLinear = effective.maxLinear
     }
 
-    fun setTopButton(a: ButtonAction) {
-        _topButton.value = a
-        persist { settings.setTopButton(a) }
-        applyEffectiveSpeed()
+    // ---- Semi-autonomous maneuvers (Auto group) ----------------------------------------
+
+    /** Row pitch in metres for auto-turns: cutting width − overlap, floored to a sane min. */
+    private fun rowPitchMetres(): Float {
+        val mm = (_cuttingWidthMm.value - _rowOverlapMm.value).coerceAtLeast(MIN_PITCH_MM)
+        return mm / 1000f
     }
 
-    fun setBottomButton(a: ButtonAction) {
-        _bottomButton.value = a
-        persist { settings.setBottomButton(a) }
-        applyEffectiveSpeed()
+    /**
+     * In the Auto group, with the big button held (and not the both-button chord), a
+     * deliberate stick push starts a maneuver: left/right → K-turn into the adjacent row,
+     * forward/back → cruise control. One maneuver per big-button press.
+     */
+    private fun maybeStartAuto() {
+        if (_modeGroup.value != ControllerModeGroup.AUTO) return
+        if (_modeSelecting.value || activeManeuver != null || !autoTriggerArmed) return
+        val bigHeld = SettingsStore.KEYCODE_BOTTOM in heldButtons
+        val topHeld = SettingsStore.KEYCODE_TOP in heldButtons
+        if (!bigHeld || topHeld) return
+        val v = _control.value
+        if (hypot(v.drive, v.turn) < AUTO_TRIGGER_DEADZONE) return
+
+        if (abs(v.turn) >= abs(v.drive)) startUTurn(if (v.turn > 0f) TurnDirection.LEFT else TurnDirection.RIGHT)
+        else startCruise(forward = v.drive > 0f)
+    }
+
+    /** Touch parity: single-tap the joystick's left/right edge (Auto mode) → start a K-turn. */
+    fun touchUTurn(left: Boolean) {
+        if (startTouchAllowed()) startUTurn(if (left) TurnDirection.LEFT else TurnDirection.RIGHT)
+    }
+
+    /** Touch parity: single-tap the joystick's top/bottom edge (Auto mode) → start cruise. */
+    fun touchCruise(forward: Boolean) {
+        if (startTouchAllowed()) startCruise(forward)
+    }
+
+    /** Gate for touch-initiated maneuvers; a tap while one is running cancels it instead. */
+    private fun startTouchAllowed(): Boolean {
+        if (controller == null || _modeGroup.value != ControllerModeGroup.AUTO || _modeSelecting.value) return false
+        if (activeManeuver != null) { cancelManeuver(); return false }
+        return true
+    }
+
+    private fun startUTurn(dir: TurnDirection) {
+        val style = _turnStyle.value
+        val word = if (style == TurnStyle.U_TURN) "U-turn" else "K-turn"
+        _maneuverLabel.value = "$word ${if (dir == TurnDirection.LEFT) "left" else "right"}"
+        startManeuver(
+            MultiPointTurn(
+                dir,
+                rowPitchMetres(),
+                MultiPointTurn.Params(
+                    turnScale = TURN_LIMIT,
+                    linearScale = controller?.maxLinear ?: SpeedMode.NORMAL.maxLinear,
+                    turnRadius = _turnRadiusMm.value / 1000f,
+                ),
+                style = style,
+            ),
+            isTurn = true,
+        )
+    }
+
+    private fun startCruise(forward: Boolean) {
+        _maneuverLabel.value = if (forward) "Cruise forward" else "Cruise back"
+        startManeuver(CruiseManeuver(if (forward) CRUISE_DRIVE else -CRUISE_DRIVE))
+    }
+
+    private fun startManeuver(m: Maneuver, isTurn: Boolean = false) {
+        activeManeuver = m
+        activeIsTurn = isTurn
+        maneuverArmed = false
+        autoTriggerArmed = false
+        smoother.reset()
+    }
+
+    /** Stop and clear the active maneuver. Safe to call when none is running. */
+    private fun cancelManeuver() {
+        if (activeManeuver == null) return
+        activeManeuver = null
+        maneuverArmed = false
+        _maneuverLabel.value = null
+        smoother.reset()
+        lastSentNonzero = false
+        viewModelScope.launch { runCatching { controller?.stop() } }
+    }
+
+    /** Synchronously drop any maneuver / mode-select (E-STOP and backgrounding paths). */
+    private fun clearAutoState() {
+        activeManeuver = null
+        maneuverArmed = false
+        _modeSelecting.value = false
+        _maneuverLabel.value = null
+    }
+
+    /** One control tick while a maneuver is driving: feed it telemetry, send its command. */
+    private suspend fun stepManeuver(dt: Float) {
+        val m = activeManeuver ?: return
+        val tel = _state.value.telemetry
+        val pos = tel?.position
+        if (pos == null) { cancelManeuver(); return } // no pose → can't close the loop safely
+        val cmd = m.step(Pose(pos.first, pos.second, tel.heading ?: 0f), dt)
+        if (cmd.done) {
+            val wasTurn = activeIsTurn
+            cancelManeuver()
+            // Hand off into cruise down the new row, if enabled — the user's mowing loop:
+            // cruise → tap turn → it sets off again.
+            if (wasTurn && _resumeCruise.value) startCruise(forward = true)
+            return
+        }
+        // Cruise lets the user steer live: blend the stick's left/right onto the command.
+        val turn = if (m is CruiseManeuver) (cmd.turn + _control.value.turn).coerceIn(-1f, 1f) else cmd.turn
+        runCatching { controller?.drive(cmd.drive, turn) }
+        lastSentNonzero = true
+        smoother.reset(cmd.drive, turn) // keep the smoother synced for a clean handoff
+        lastCmdLinear = cmd.drive * _speedMode.value.maxLinear
+        lastCmdAngular = turn * TURN_LIMIT
     }
 
     fun setSmoothEnabled(on: Boolean) {
@@ -232,6 +481,34 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
         _smoothLevel.value = level
         smoother.ratePerSec = level.ratePerSec
         persist { settings.setSmoothLevel(level) }
+    }
+
+    /** Mower cutting width (mm), used with overlap to place auto-turns one row over. */
+    fun setCuttingWidthMm(mm: Int) {
+        _cuttingWidthMm.value = mm
+        persist { settings.setCuttingWidthMm(mm) }
+    }
+
+    /** Row overlap (mm); row pitch = cutting width − overlap. */
+    fun setRowOverlapMm(mm: Int) {
+        _rowOverlapMm.value = mm
+        persist { settings.setRowOverlapMm(mm) }
+    }
+
+    /** K-turn arc radius (mm). */
+    fun setTurnRadiusMm(mm: Int) {
+        _turnRadiusMm.value = mm
+        persist { settings.setTurnRadiusMm(mm) }
+    }
+
+    fun setTurnStyle(t: TurnStyle) {
+        _turnStyle.value = t
+        persist { settings.setTurnStyle(t) }
+    }
+
+    fun setResumeCruise(on: Boolean) {
+        _resumeCruise.value = on
+        persist { settings.setResumeCruiseAfterTurn(on) }
     }
 
     private fun persist(block: suspend () -> Unit) {
@@ -264,25 +541,33 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
 
     fun emergencyStop() {
         _control.value = ControlVector.ZERO
+        clearAutoState() // any maneuver / mode-select drops instantly too
         smoother.reset() // bypass controlled deceleration — E-STOP is always instant
         lastSentNonzero = false
         bladeOff()
+        // Quiet the 80ms loop while the persistent stop burst owns the BLE channel —
+        // a single stop frame can be silently dropped (GATT busy) and the mower latches
+        // its last command, so the burst in MowerController.emergencyStop is the real stop.
+        estopTicks = ESTOP_QUIET_TICKS
         val enc = DeckHeights.encoded(_deck.value.heightMm)
         viewModelScope.launch {
-            runCatching { controller?.stop() }
-            runCatching { controller?.setDeckBlade(0, enc) }
+            runCatching { controller?.emergencyStop(enc) }
         }
     }
 
     /** Lifecycle ON_STOP / leaving the screen: blade off, stop, drop the link. */
     fun onAppBackgrounded() {
         _control.value = ControlVector.ZERO
+        clearAutoState() // instant stop on the way out
         smoother.reset() // instant stop on the way out
         lastSentNonzero = false
         bladeOff()
+        estopTicks = ESTOP_QUIET_TICKS
         val enc = DeckHeights.encoded(_deck.value.heightMm)
         viewModelScope.launch {
-            runCatching { controller?.setDeckBlade(0, enc) }
+            // Burst BEFORE dropping the link: once we disconnect, the mower keeps whatever
+            // command was latched — a single dropped stop frame would leave it driving.
+            runCatching { controller?.emergencyStop(enc) }
             runCatching { controller?.disconnect() }
         }
     }
@@ -298,6 +583,16 @@ class DriveViewModel(app: Application) : AndroidViewModel(app) {
         const val TRAIL_MIN_MOVE = 0.05f // metres between recorded path points
         const val TRAIL_MAX = 4000       // cap the in-memory path
         const val TURN_LIMIT = 0.6f      // matches the protocol's angular clamp
+        const val MIN_PITCH_MM = 20      // floor for cutting width − overlap
+        const val ESTOP_QUIET_TICKS = 14 // ≈1.1s — covers the controller's stop burst
+        const val STICK_DEADZONE = 0.2f  // fresh deflection that cancels a maneuver
+        const val STICK_RECENTER = 0.15f // stick treated as centered (re-arming)
+        const val MODE_CYCLE_THRESHOLD = 0.6f // L/R push to step the mode group
+        const val AUTO_TRIGGER_DEADZONE = 0.5f // deliberate push to start a maneuver
+        const val CRUISE_DRIVE = 0.6f    // normalized cruise speed (~0.3 m/s in Normal)
+        const val CRUISE_DISENGAGE_DRIVE = 0.5f // fwd/back past this disengages cruise
+        const val ASSIST_TURN_DEADZONE = 0.1f // user steering past this releases heading hold
+        const val ASSIST_MIN_DRIVE = 0.1f     // heading hold only engages while driving
     }
 }
 
